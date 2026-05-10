@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Job {
+  id          String   @id @default(cuid())
+  name        String
+  fileName    String
+  totalEmails Int      @default(0)
+  processed   Int      @default(0)
+  safe        Int      @default(0)
+  risky       Int      @default(0)
+  invalid     Int      @default(0)
+  unknown     Int      @default(0)
+  status      JobStatus @default(PENDING)
+  concurrency Int      @default(10)
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  results     Result[]
+}
+
+model Result {
+  id             String  @id @default(cuid())
+  jobId          String
+  email          String
+  name           String  @default("")
+  status         String  // safe | risky | invalid | unknown | error
+  isReachable    String  @default("")
+  isDisposable   Boolean @default(false)
+  isRoleAccount  Boolean @default(false)
+  isCatchAll     Boolean @default(false)
+  mxAcceptsMail  Boolean @default(false)
+  smtpDeliverable Boolean @default(false)
+  smtpDisabled   Boolean @default(false)
+  rawError       String?
+  job            Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, status])
+  @@index([jobId])
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  PAUSED
+  COMPLETED
+  STOPPED
+  FAILED
+}

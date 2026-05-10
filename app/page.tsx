@@ -1,602 +1,553 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  Upload,
-  Download,
-  CheckCircle2,
-  AlertTriangle,
-  XCircle,
-  HelpCircle,
-  Loader2,
-  Mail,
-  ChevronDown,
-  ChevronUp,
-  BarChart3,
-  FileText,
-  X,
+  Upload, Sun, Moon, Play, Pause, Square, Trash2,
+  Download, CheckCircle, AlertTriangle, XCircle,
+  HelpCircle, Loader2, Mail, Clock, Zap, Plus, X
 } from "lucide-react";
-import Papa from "papaparse";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-type Status = "safe" | "risky" | "invalid" | "unknown" | "pending" | "error";
+type JobStatus = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "STOPPED" | "FAILED";
 
-interface ResultRow {
-  email: string;
+interface Job {
+  id: string;
   name: string;
-  status: Status;
-  is_reachable: string;
-  is_disposable: boolean;
-  is_role_account: boolean;
-  is_catch_all: boolean;
-  mx_accepts_mail: boolean;
-  smtp_deliverable: boolean;
-  smtp_disabled: boolean;
-  raw_error?: string;
+  fileName: string;
+  totalEmails: number;
+  processed: number;
+  safe: number;
+  risky: number;
+  invalid: number;
+  unknown: number;
+  status: JobStatus;
+  concurrency: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-function classifyResult(data: Record<string, unknown>): Status {
-  const reachable = data.is_reachable as string;
-  if (reachable === "safe") return "safe";
-  if (reachable === "risky") return "risky";
-  if (reachable === "invalid") return "invalid";
-  return "unknown";
+function fmt(n: number) { return n.toLocaleString(); }
+
+function elapsed(startedAt: string | null, finishedAt: string | null): string {
+  if (!startedAt) return "—";
+  const start = new Date(startedAt).getTime();
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  const secs = Math.floor((end - start) / 1000);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
-function statusIcon(status: Status, size = 16) {
-  const cls = `w-${size === 16 ? 4 : 5} h-${size === 16 ? 4 : 5}`;
-  if (status === "safe") return <CheckCircle2 className={cls} style={{ color: "var(--safe)" }} />;
-  if (status === "risky") return <AlertTriangle className={cls} style={{ color: "var(--risky)" }} />;
-  if (status === "invalid") return <XCircle className={cls} style={{ color: "var(--invalid)" }} />;
-  if (status === "pending") return <Loader2 className={`${cls} spin-slow`} style={{ color: "var(--text-muted)" }} />;
-  if (status === "error") return <XCircle className={cls} style={{ color: "var(--invalid)" }} />;
-  return <HelpCircle className={cls} style={{ color: "var(--unknown)" }} />;
+function eta(job: Job): string {
+  if (!job.startedAt || job.processed === 0) return "Calculating…";
+  const secs = (Date.now() - new Date(job.startedAt).getTime()) / 1000;
+  const rate = job.processed / secs;
+  const remaining = job.totalEmails - job.processed;
+  const etaSecs = Math.round(remaining / rate);
+  if (etaSecs < 60) return `~${etaSecs}s left`;
+  if (etaSecs < 3600) return `~${Math.floor(etaSecs / 60)}m left`;
+  return `~${Math.floor(etaSecs / 3600)}h ${Math.floor((etaSecs % 3600) / 60)}m left`;
 }
 
-function statusLabel(status: Status) {
-  const map: Record<Status, { label: string; color: string }> = {
-    safe: { label: "Safe", color: "var(--safe)" },
-    risky: { label: "Risky", color: "var(--risky)" },
-    invalid: { label: "Invalid", color: "var(--invalid)" },
-    unknown: { label: "Unknown", color: "var(--unknown)" },
-    pending: { label: "Checking…", color: "var(--text-muted)" },
-    error: { label: "Error", color: "var(--invalid)" },
+function speed(job: Job): string {
+  if (!job.startedAt || job.processed === 0) return "—";
+  const secs = (Date.now() - new Date(job.startedAt).getTime()) / 1000;
+  return `${Math.round((job.processed / secs) * 60)}/min`;
+}
+
+const STATUS_CONFIG: Record<JobStatus, { label: string; color: string; dot: string }> = {
+  PENDING:   { label: "Pending",   color: "var(--text-3)",   dot: "var(--text-4)" },
+  RUNNING:   { label: "Running",   color: "var(--accent)",   dot: "var(--accent)" },
+  PAUSED:    { label: "Paused",    color: "var(--risky)",    dot: "var(--risky)" },
+  COMPLETED: { label: "Completed", color: "var(--safe)",     dot: "var(--safe)" },
+  STOPPED:   { label: "Stopped",   color: "var(--text-3)",   dot: "var(--text-3)" },
+  FAILED:    { label: "Failed",    color: "var(--invalid)",  dot: "var(--invalid)" },
+};
+
+// ── Theme Toggle ──────────────────────────────────────────────────────────────
+
+function ThemeToggle() {
+  const [dark, setDark] = useState(false);
+  useEffect(() => {
+    setDark(document.documentElement.getAttribute("data-theme") === "dark");
+  }, []);
+  const toggle = () => {
+    const next = dark ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("theme", next);
+    setDark(!dark);
   };
-  return map[status] || map.unknown;
+  return (
+    <button onClick={toggle} className="icon-btn" title="Toggle theme">
+      {dark ? <Sun size={16} /> : <Moon size={16} />}
+    </button>
+  );
 }
 
-function downloadCSV(rows: ResultRow[], filename: string) {
-  const csv = Papa.unparse(rows.map((r) => ({
-    email: r.email,
-    name: r.name,
-    status: r.status,
-    is_reachable: r.is_reachable,
-    is_disposable: r.is_disposable,
-    is_role_account: r.is_role_account,
-    is_catch_all: r.is_catch_all,
-    mx_accepts_mail: r.mx_accepts_mail,
-    smtp_deliverable: r.smtp_deliverable,
-    smtp_disabled: r.smtp_disabled,
-  })));
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+// ── Upload Modal ──────────────────────────────────────────────────────────────
 
-// ─── Component ────────────────────────────────────────────────────────────────
+function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [concurrency, setConcurrency] = useState(10);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-const CONCURRENCY = 3; // parallel requests to Reacher
-
-export default function HomePage() {
-  const [rows, setRows] = useState<ResultRow[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [fileName, setFileName] = useState("");
-  const [filterStatus, setFilterStatus] = useState<Status | "all">("all");
-  const [expandedRow, setExpandedRow] = useState<number | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [startedAt, setStartedAt] = useState<Date | null>(null);
-  const [finishedAt, setFinishedAt] = useState<Date | null>(null);
-  const abortRef = useRef(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  const processed = rows.filter((r) => r.status !== "pending").length;
-  const total = rows.length;
-  const progress = total > 0 ? Math.round((processed / total) * 100) : 0;
-
-  const counts = {
-    safe: rows.filter((r) => r.status === "safe").length,
-    risky: rows.filter((r) => r.status === "risky").length,
-    invalid: rows.filter((r) => r.status === "invalid").length,
-    unknown: rows.filter((r) => r.status === "unknown" || r.status === "error").length,
-    pending: rows.filter((r) => r.status === "pending").length,
+  const handleFile = (f: File) => {
+    if (!f.name.endsWith(".csv")) { setError("Only CSV files are supported"); return; }
+    setFile(f);
+    setError("");
   };
 
-  const parseCSV = useCallback((file: File) => {
-    setFileName(file.name);
-    setRows([]);
-    setStartedAt(null);
-    setFinishedAt(null);
+  const submit = async () => {
+    if (!file) return;
+    setLoading(true);
+    setError("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("concurrency", String(concurrency));
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      onUploaded();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    Papa.parse<Record<string, string>>(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (result) => {
-        const headers = result.meta.fields || [];
-        const emailCol = headers.find((h) => h.toLowerCase().includes("email"));
-        const nameCol = headers.find((h) => h.toLowerCase().includes("name"));
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">New Verification Job</h2>
+          <button className="icon-btn" onClick={onClose}><X size={16} /></button>
+        </div>
 
-        if (!emailCol) {
-          alert("CSV must have an 'email' column.");
-          return;
-        }
+        {/* Drop zone */}
+        <div
+          className={`dropzone${dragging ? " dragging" : ""}${file ? " has-file" : ""}`}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
+          onClick={() => inputRef.current?.click()}
+        >
+          <input ref={inputRef} type="file" accept=".csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+          {file ? (
+            <div className="dropzone-file">
+              <div className="dropzone-file-icon"><Mail size={20} /></div>
+              <div>
+                <p className="dropzone-file-name">{file.name}</p>
+                <p className="dropzone-file-size">{(file.size / 1024).toFixed(1)} KB</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="dropzone-icon"><Upload size={22} /></div>
+              <p className="dropzone-label">Drop your CSV here or <span className="link">browse</span></p>
+              <p className="dropzone-hint">Must have an <code>email</code> column. <code>name</code> is optional.</p>
+            </>
+          )}
+        </div>
 
-        const parsed: ResultRow[] = result.data
-          .filter((row) => row[emailCol]?.trim())
-          .map((row) => ({
-            email: row[emailCol]?.trim() || "",
-            name: nameCol ? (row[nameCol]?.trim() || "") : "",
-            status: "pending",
-            is_reachable: "",
-            is_disposable: false,
-            is_role_account: false,
-            is_catch_all: false,
-            mx_accepts_mail: false,
-            smtp_deliverable: false,
-            smtp_disabled: false,
-          }));
+        {/* Concurrency */}
+        <div className="field">
+          <div className="field-header">
+            <label className="field-label">Concurrency</label>
+            <span className="field-value">{concurrency} parallel</span>
+          </div>
+          <input
+            type="range" min={1} max={50} value={concurrency}
+            onChange={(e) => setConcurrency(Number(e.target.value))}
+            className="slider"
+          />
+          <div className="slider-labels">
+            <span>1 (safe)</span><span>25</span><span>50 (fast)</span>
+          </div>
+          <p className="field-hint">Higher = faster but more likely to be rate-limited by Gmail/Yahoo.</p>
+        </div>
 
-        setRows(parsed);
-      },
-    });
+        {error && <p className="error-msg">{error}</p>}
+
+        <div className="modal-footer">
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={submit} disabled={!file || loading}>
+            {loading ? <><Loader2 size={14} className="spin" /> Uploading…</> : <><Plus size={14} /> Create Job</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Job Card ──────────────────────────────────────────────────────────────────
+
+function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
+  const pct = job.totalEmails > 0 ? Math.round((job.processed / job.totalEmails) * 100) : 0;
+  const sc = STATUS_CONFIG[job.status];
+  const isActive = job.status === "RUNNING";
+  const isPaused = job.status === "PAUSED";
+  const isDone = ["COMPLETED", "STOPPED", "FAILED"].includes(job.status);
+  const canStart = ["PENDING", "STOPPED", "PAUSED"].includes(job.status);
+
+  const action = async (type: string) => {
+    if (type === "delete") {
+      if (!confirm(`Delete "${job.name}"? This cannot be undone.`)) return;
+      await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
+    } else if (type === "start") {
+      await fetch(`/api/jobs/${job.id}`, { method: "POST" });
+    } else {
+      await fetch(`/api/jobs/${job.id}/actions?action=${type}`, { method: "POST" });
+    }
+    onAction();
+  };
+
+  const download = (status: string) => {
+    window.open(`/api/jobs/${job.id}/download?status=${status}`, "_blank");
+  };
+
+  return (
+    <div className="job-card fade-up">
+      {/* Header */}
+      <div className="job-header">
+        <div className="job-title-row">
+          <h3 className="job-name">{job.name}</h3>
+          <span className="status-badge" style={{ color: sc.color, borderColor: `${sc.color}30`, background: `${sc.color}10` }}>
+            {isActive && <span className="pulse-dot" style={{ background: sc.dot }} />}
+            {sc.label}
+          </span>
+        </div>
+        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · {job.concurrency} concurrent</p>
+      </div>
+
+      {/* Progress bar */}
+      <div className="progress-track">
+        <div
+          className={`progress-fill${isActive ? " progress-bar" : ""}`}
+          style={{ width: `${pct}%`, background: isActive ? undefined : isDone && job.status === "COMPLETED" ? "var(--safe)" : "var(--border-2)" }}
+        />
+      </div>
+
+      {/* Stats row */}
+      <div className="job-stats">
+        <div className="stat">
+          <CheckCircle size={13} style={{ color: "var(--safe)" }} />
+          <span className="stat-val" style={{ color: "var(--safe)" }}>{fmt(job.safe)}</span>
+          <span className="stat-label">Safe</span>
+        </div>
+        <div className="stat">
+          <AlertTriangle size={13} style={{ color: "var(--risky)" }} />
+          <span className="stat-val" style={{ color: "var(--risky)" }}>{fmt(job.risky)}</span>
+          <span className="stat-label">Risky</span>
+        </div>
+        <div className="stat">
+          <XCircle size={13} style={{ color: "var(--invalid)" }} />
+          <span className="stat-val" style={{ color: "var(--invalid)" }}>{fmt(job.invalid)}</span>
+          <span className="stat-label">Invalid</span>
+        </div>
+        <div className="stat">
+          <HelpCircle size={13} style={{ color: "var(--unknown)" }} />
+          <span className="stat-val" style={{ color: "var(--unknown)" }}>{fmt(job.unknown)}</span>
+          <span className="stat-label">Unknown</span>
+        </div>
+        <div className="stat-divider" />
+        <div className="stat">
+          <Clock size={13} style={{ color: "var(--text-3)" }} />
+          <span className="stat-val">{elapsed(job.startedAt, job.finishedAt)}</span>
+          <span className="stat-label">{isDone ? "Total" : "Elapsed"}</span>
+        </div>
+        {isActive && (
+          <div className="stat">
+            <Zap size={13} style={{ color: "var(--accent)" }} />
+            <span className="stat-val" style={{ color: "var(--accent)" }}>{speed(job)}</span>
+            <span className="stat-label">Speed</span>
+          </div>
+        )}
+        <div className="stat-progress">
+          <span className="stat-pct">{pct}%</span>
+          <span className="stat-label">{fmt(job.processed)} / {fmt(job.totalEmails)}</span>
+          {isActive && <span className="stat-eta">{eta(job)}</span>}
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="job-actions">
+        {/* Controls */}
+        <div className="job-controls">
+          {canStart && (
+            <button className="btn btn-primary btn-sm" onClick={() => action("start")}>
+              <Play size={13} /> {isPaused ? "Resume" : "Start"}
+            </button>
+          )}
+          {isActive && (
+            <button className="btn btn-ghost btn-sm" onClick={() => action("pause")}>
+              <Pause size={13} /> Pause
+            </button>
+          )}
+          {(isActive || isPaused) && (
+            <button className="btn btn-ghost btn-sm" onClick={() => action("stop")}>
+              <Square size={13} /> Stop
+            </button>
+          )}
+        </div>
+
+        {/* Downloads + Delete */}
+        <div className="job-downloads">
+          {(isDone || job.processed > 0) && (
+            <>
+              <button className="btn btn-ghost btn-sm download-safe" onClick={() => download("safe")}>
+                <Download size={12} /> Safe ({fmt(job.safe)})
+              </button>
+              <button className="btn btn-ghost btn-sm download-risky" onClick={() => download("risky")}>
+                <Download size={12} /> Risky ({fmt(job.risky)})
+              </button>
+              <button className="btn btn-ghost btn-sm download-invalid" onClick={() => download("invalid")}>
+                <Download size={12} /> Invalid ({fmt(job.invalid)})
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => download("all")}>
+                <Download size={12} /> All
+              </button>
+            </>
+          )}
+          <button className="btn btn-ghost btn-sm btn-danger" onClick={() => action("delete")}>
+            <Trash2 size={13} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
+export default function Dashboard() {
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [showUpload, setShowUpload] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await fetch("/api/jobs");
+      const data = await res.json();
+      setJobs(data);
+    } catch { /* silent */ }
+    finally { setLoading(false); }
   }, []);
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setIsDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file?.name.endsWith(".csv")) parseCSV(file);
-    },
-    [parseCSV]
-  );
+  useEffect(() => {
+    fetchJobs();
+    intervalRef.current = setInterval(fetchJobs, 3000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [fetchJobs]);
 
-  const runVerification = useCallback(async () => {
-    if (rows.length === 0) return;
-    abortRef.current = false;
-    setIsRunning(true);
-    setStartedAt(new Date());
-    setFinishedAt(null);
-
-    // Reset all pending
-    setRows((prev) =>
-      prev.map((r) => ({ ...r, status: "pending" as Status }))
-    );
-
-    // Process with concurrency
-    const queue = [...rows.map((_, i) => i)];
-    let active = 0;
-
-    await new Promise<void>((resolve) => {
-      function next() {
-        while (active < CONCURRENCY && queue.length > 0) {
-          if (abortRef.current) { resolve(); return; }
-          const idx = queue.shift()!;
-          active++;
-          verifyOne(idx).then(() => {
-            active--;
-            if (queue.length === 0 && active === 0) resolve();
-            else next();
-          });
-        }
-      }
-      next();
-    });
-
-    setIsRunning(false);
-    setFinishedAt(new Date());
-  }, [rows]);
-
-  async function verifyOne(idx: number) {
-    const email = rows[idx].email;
-    try {
-      const res = await fetch("/api/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-      const status = classifyResult(data);
-
-      setRows((prev) => {
-        const next = [...prev];
-        next[idx] = {
-          ...next[idx],
-          status,
-          is_reachable: data.is_reachable || "",
-          is_disposable: data.misc?.is_disposable || false,
-          is_role_account: data.misc?.is_role_account || false,
-          is_catch_all: data.smtp?.is_catch_all || false,
-          mx_accepts_mail: data.mx?.accepts_mail || false,
-          smtp_deliverable: data.smtp?.is_deliverable || false,
-          smtp_disabled: data.smtp?.is_disabled || false,
-        };
-        return next;
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "error";
-      setRows((prev) => {
-        const next = [...prev];
-        next[idx] = { ...next[idx], status: "error", raw_error: msg };
-        return next;
-      });
-    }
-  }
-
-  const filteredRows = filterStatus === "all"
-    ? rows
-    : rows.filter((r) =>
-        filterStatus === "unknown"
-          ? r.status === "unknown" || r.status === "error"
-          : r.status === filterStatus
-      );
-
-  const elapsed = startedAt && finishedAt
-    ? ((finishedAt.getTime() - startedAt.getTime()) / 1000).toFixed(1)
-    : null;
+  const hasActive = jobs.some((j) => j.status === "RUNNING" || j.status === "PAUSED");
+  const totalVerified = jobs.reduce((a, j) => a + j.processed, 0);
+  const totalSafe = jobs.reduce((a, j) => a + j.safe, 0);
 
   return (
-    <div className="min-h-screen" style={{ background: "var(--bg)", fontFamily: "var(--font-sans)" }}>
-      {/* Header */}
-      <header style={{ borderBottom: "1px solid var(--border)" }} className="px-8 py-5 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "var(--accent)", color: "#0a0f0d" }}>
-            <Mail className="w-4 h-4" />
-          </div>
-          <div>
-            <span className="font-semibold text-lg tracking-tight" style={{ color: "var(--text-primary)" }}>Reacher</span>
-            <span className="ml-2 text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "var(--surface-2)", color: "var(--text-secondary)", border: "1px solid var(--border-2)" }}>
-              Self-hosted
-            </span>
-          </div>
-        </div>
-        <p className="text-sm" style={{ color: "var(--text-muted)" }}>Bulk Email Verification</p>
-      </header>
-
-      <main className="max-w-6xl mx-auto px-6 py-10 space-y-8">
-
-        {/* Upload Area */}
-        {rows.length === 0 && (
-          <div
-            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => fileRef.current?.click()}
-            className="rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all duration-200"
-            style={{
-              border: `2px dashed ${isDragging ? "var(--accent)" : "var(--border-2)"}`,
-              background: isDragging ? "rgba(45,222,110,0.04)" : "var(--surface)",
-              padding: "80px 40px",
-              minHeight: "320px",
-            }}
-          >
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center mb-6" style={{ background: "var(--surface-2)", border: "1px solid var(--border-2)" }}>
-              <Upload className="w-7 h-7" style={{ color: isDragging ? "var(--accent)" : "var(--text-secondary)" }} />
+    <>
+      <div className="app">
+        {/* Navbar */}
+        <nav className="navbar">
+          <div className="navbar-inner">
+            <div className="navbar-brand">
+              <div className="brand-icon"><Mail size={15} /></div>
+              <span className="brand-name">Reacher</span>
+              <span className="brand-tag">Self-hosted</span>
             </div>
-            <h2 className="text-xl font-semibold mb-2" style={{ color: "var(--text-primary)" }}>
-              Drop your CSV here
-            </h2>
-            <p className="text-sm mb-6" style={{ color: "var(--text-muted)" }}>
-              or click to browse — must have <code className="px-1.5 py-0.5 rounded text-xs" style={{ background: "var(--surface-2)", color: "var(--accent)" }}>email</code> and optionally <code className="px-1.5 py-0.5 rounded text-xs" style={{ background: "var(--surface-2)", color: "var(--text-secondary)" }}>name</code> columns
-            </p>
-            <button
-              className="px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
-              style={{ background: "var(--accent)", color: "#0a0f0d" }}
-            >
-              Select CSV File
-            </button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) parseCSV(file);
-              }}
-            />
-          </div>
-        )}
-
-        {/* Loaded but not started */}
-        {rows.length > 0 && !isRunning && processed === 0 && (
-          <div className="rounded-2xl p-6 flex items-center justify-between" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "var(--surface-2)" }}>
-                <FileText className="w-5 h-5" style={{ color: "var(--accent)" }} />
-              </div>
-              <div>
-                <p className="font-medium" style={{ color: "var(--text-primary)" }}>{fileName}</p>
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>{total} email{total !== 1 ? "s" : ""} loaded</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => { setRows([]); setFileName(""); }}
-                className="px-4 py-2 rounded-lg text-sm transition-colors"
-                style={{ color: "var(--text-muted)", border: "1px solid var(--border-2)" }}
-              >
-                <X className="w-4 h-4 inline mr-1.5" />Clear
-              </button>
-              <button
-                onClick={runVerification}
-                className="px-5 py-2.5 rounded-lg text-sm font-semibold transition-all"
-                style={{ background: "var(--accent)", color: "#0a0f0d" }}
-              >
-                Start Verification →
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Progress Bar (while running) */}
-        {isRunning && (
-          <div className="rounded-2xl p-6 space-y-4" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Loader2 className="w-4 h-4 spin-slow" style={{ color: "var(--accent)" }} />
-                <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-                  Verifying emails…
+            <div className="navbar-right">
+              {hasActive && (
+                <span className="live-badge">
+                  <span className="pulse-dot" style={{ background: "var(--accent)" }} />
+                  Live
                 </span>
-              </div>
-              <span className="text-sm font-mono" style={{ color: "var(--text-secondary)" }}>
-                {processed} / {total}
-              </span>
-            </div>
-            <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
-              <div
-                className="h-full rounded-full progress-shimmer transition-all duration-300"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-            <div className="flex gap-6 text-xs" style={{ color: "var(--text-muted)" }}>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "var(--safe)" }} />{counts.safe} safe</span>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "var(--risky)" }} />{counts.risky} risky</span>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "var(--invalid)" }} />{counts.invalid} invalid</span>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "var(--unknown)" }} />{counts.unknown} unknown</span>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "var(--text-muted)" }} />{counts.pending} pending</span>
-            </div>
-            <button
-              onClick={() => { abortRef.current = true; setIsRunning(false); }}
-              className="text-xs px-3 py-1.5 rounded-lg"
-              style={{ color: "var(--invalid)", border: "1px solid var(--invalid)", opacity: 0.7 }}
-            >
-              Stop
-            </button>
-          </div>
-        )}
-
-        {/* Summary + Downloads (after done) */}
-        {processed > 0 && !isRunning && (
-          <div className="rounded-2xl p-6 space-y-5" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <BarChart3 className="w-4 h-4" style={{ color: "var(--accent)" }} />
-                <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
-                  Results — {processed} of {total} verified
-                  {elapsed && <span className="ml-2 text-sm font-normal" style={{ color: "var(--text-muted)" }}>in {elapsed}s</span>}
-                </span>
-              </div>
-              <button
-                onClick={() => { setRows([]); setFileName(""); setStartedAt(null); setFinishedAt(null); }}
-                className="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5"
-                style={{ color: "var(--text-muted)", border: "1px solid var(--border-2)" }}
-              >
-                <X className="w-3 h-3" /> New Upload
-              </button>
-            </div>
-
-            {/* Stat Cards */}
-            <div className="grid grid-cols-4 gap-3">
-              {(["safe", "risky", "invalid", "unknown"] as const).map((s) => {
-                const pct = total > 0 ? Math.round((counts[s] / total) * 100) : 0;
-                const sl = statusLabel(s);
-                return (
-                  <button
-                    key={s}
-                    onClick={() => setFilterStatus(filterStatus === s ? "all" : s)}
-                    className="rounded-xl p-4 text-left transition-all"
-                    style={{
-                      background: filterStatus === s ? "rgba(45,222,110,0.06)" : "var(--surface-2)",
-                      border: `1px solid ${filterStatus === s ? "var(--accent)" : "var(--border-2)"}`,
-                    }}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      {statusIcon(s, 20)}
-                      <span className="text-2xl font-bold font-mono" style={{ color: sl.color }}>{counts[s]}</span>
-                    </div>
-                    <p className="text-sm font-medium" style={{ color: sl.color }}>{sl.label}</p>
-                    <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{pct}% of total</p>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Download Buttons */}
-            <div className="flex flex-wrap gap-2 pt-1">
-              <button
-                onClick={() => downloadCSV(rows, "all_results.csv")}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium"
-                style={{ background: "var(--accent)", color: "#0a0f0d" }}
-              >
-                <Download className="w-4 h-4" /> Download All ({total})
-              </button>
-              {(["safe", "risky", "invalid", "unknown"] as const).map((s) => {
-                const filtered = rows.filter((r) => s === "unknown" ? (r.status === "unknown" || r.status === "error") : r.status === s);
-                if (filtered.length === 0) return null;
-                const sl = statusLabel(s);
-                return (
-                  <button
-                    key={s}
-                    onClick={() => downloadCSV(filtered, `${s}_emails.csv`)}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm"
-                    style={{ border: `1px solid var(--border-2)`, color: sl.color }}
-                  >
-                    <Download className="w-3.5 h-3.5" /> {sl.label} ({filtered.length})
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Results Table */}
-        {rows.length > 0 && (
-          <div className="rounded-2xl overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-            {/* Filter tabs */}
-            <div className="flex items-center gap-1 px-4 py-3" style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
-              {(["all", "safe", "risky", "invalid", "unknown"] as const).map((f) => {
-                const count = f === "all" ? total : f === "unknown" ? counts.unknown : counts[f];
-                return (
-                  <button
-                    key={f}
-                    onClick={() => setFilterStatus(f)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-colors"
-                    style={{
-                      background: filterStatus === f ? "var(--surface-2)" : "transparent",
-                      color: filterStatus === f ? "var(--text-primary)" : "var(--text-muted)",
-                      border: filterStatus === f ? "1px solid var(--border-2)" : "1px solid transparent",
-                    }}
-                  >
-                    {f === "all" ? "All" : f.charAt(0).toUpperCase() + f.slice(1)} ({count})
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Table */}
-            <div style={{ background: "var(--bg)", maxHeight: "520px", overflowY: "auto" }}>
-              <table className="w-full text-sm">
-                <thead style={{ position: "sticky", top: 0, background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
-                  <tr>
-                    <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "var(--text-muted)", width: "40px" }}>#</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Email</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Name</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Status</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Details</th>
-                    <th className="px-4 py-3 w-8" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredRows.map((row, i) => {
-                    const realIdx = rows.indexOf(row);
-                    const sl = statusLabel(row.status);
-                    const isExpanded = expandedRow === realIdx;
-
-                    return (
-                      <>
-                        <tr
-                          key={realIdx}
-                          style={{
-                            borderBottom: "1px solid var(--border)",
-                            background: isExpanded ? "var(--surface)" : "transparent",
-                          }}
-                        >
-                          <td className="px-4 py-3 font-mono text-xs" style={{ color: "var(--text-muted)" }}>{i + 1}</td>
-                          <td className="px-4 py-3 font-mono text-xs" style={{ color: "var(--text-primary)" }}>{row.email}</td>
-                          <td className="px-4 py-3" style={{ color: "var(--text-secondary)" }}>{row.name || "—"}</td>
-                          <td className="px-4 py-3">
-                            <span className="flex items-center gap-1.5">
-                              {statusIcon(row.status)}
-                              <span className="text-xs font-medium" style={{ color: sl.color }}>{sl.label}</span>
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            {row.status !== "pending" && row.status !== "error" && (
-                              <div className="flex flex-wrap gap-1">
-                                {row.is_disposable && <Tag label="Disposable" color="var(--invalid)" />}
-                                {row.is_catch_all && <Tag label="Catch-all" color="var(--risky)" />}
-                                {row.is_role_account && <Tag label="Role" color="var(--risky)" />}
-                                {!row.mx_accepts_mail && <Tag label="No MX" color="var(--invalid)" />}
-                              </div>
-                            )}
-                            {row.status === "error" && (
-                              <span className="text-xs font-mono" style={{ color: "var(--invalid)" }}>{row.raw_error}</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3">
-                            {row.status !== "pending" && (
-                              <button
-                                onClick={() => setExpandedRow(isExpanded ? null : realIdx)}
-                                style={{ color: "var(--text-muted)" }}
-                              >
-                                {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                        {isExpanded && (
-                          <tr key={`${realIdx}-detail`} style={{ background: "var(--surface-2)", borderBottom: "1px solid var(--border)" }}>
-                            <td colSpan={6} className="px-6 py-4">
-                              <div className="grid grid-cols-3 gap-4 text-xs">
-                                <Detail label="Is Reachable" value={row.is_reachable} />
-                                <Detail label="MX Accepts Mail" value={row.mx_accepts_mail ? "Yes" : "No"} />
-                                <Detail label="SMTP Deliverable" value={row.smtp_deliverable ? "Yes" : "No"} />
-                                <Detail label="SMTP Disabled" value={row.smtp_disabled ? "Yes" : "No"} />
-                                <Detail label="Disposable" value={row.is_disposable ? "Yes" : "No"} />
-                                <Detail label="Catch-all" value={row.is_catch_all ? "Yes" : "No"} />
-                                <Detail label="Role Account" value={row.is_role_account ? "Yes" : "No"} />
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {filteredRows.length === 0 && (
-                <div className="py-16 text-center" style={{ color: "var(--text-muted)" }}>
-                  No emails in this category yet.
-                </div>
               )}
+              <ThemeToggle />
+              <button className="btn btn-primary btn-sm" onClick={() => setShowUpload(true)}>
+                <Plus size={14} /> New Job
+              </button>
+            </div>
+          </div>
+        </nav>
+
+        {/* Summary bar */}
+        {jobs.length > 0 && (
+          <div className="summary-bar">
+            <div className="summary-inner">
+              <div className="summary-stat">
+                <span className="summary-val">{fmt(jobs.length)}</span>
+                <span className="summary-label">Jobs</span>
+              </div>
+              <div className="summary-stat">
+                <span className="summary-val">{fmt(totalVerified)}</span>
+                <span className="summary-label">Verified</span>
+              </div>
+              <div className="summary-stat">
+                <span className="summary-val" style={{ color: "var(--safe)" }}>{fmt(totalSafe)}</span>
+                <span className="summary-label">Safe</span>
+              </div>
+              <div className="summary-stat">
+                <span className="summary-val">{jobs.filter(j => j.status === "RUNNING").length}</span>
+                <span className="summary-label">Running</span>
+              </div>
             </div>
           </div>
         )}
-      </main>
-    </div>
-  );
-}
 
-// ─── Small Sub-components ─────────────────────────────────────────────────────
+        {/* Content */}
+        <main className="main">
+          {loading ? (
+            <div className="empty-state">
+              <Loader2 size={24} className="spin" style={{ color: "var(--text-4)" }} />
+            </div>
+          ) : jobs.length === 0 ? (
+            <div className="empty-state fade-up">
+              <div className="empty-icon"><Mail size={28} style={{ color: "var(--text-4)" }} /></div>
+              <h2 className="empty-title">No jobs yet</h2>
+              <p className="empty-desc">Upload a CSV to start verifying emails at scale.</p>
+              <button className="btn btn-primary" onClick={() => setShowUpload(true)}>
+                <Upload size={14} /> Upload CSV
+              </button>
+            </div>
+          ) : (
+            <div className="jobs-grid">
+              {jobs.map((job) => (
+                <JobCard key={job.id} job={job} onAction={fetchJobs} />
+              ))}
+            </div>
+          )}
+        </main>
+      </div>
 
-function Tag({ label, color }: { label: string; color: string }) {
-  return (
-    <span
-      className="px-1.5 py-0.5 rounded text-xs"
-      style={{ background: `${color}18`, color, border: `1px solid ${color}40` }}
-    >
-      {label}
-    </span>
-  );
-}
+      {showUpload && (
+        <UploadModal
+          onClose={() => setShowUpload(false)}
+          onUploaded={fetchJobs}
+        />
+      )}
 
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p style={{ color: "var(--text-muted)" }}>{label}</p>
-      <p className="font-mono mt-0.5" style={{ color: "var(--text-primary)" }}>{value}</p>
-    </div>
+      <style>{`
+        /* ── Layout ── */
+        .app { min-height: 100vh; background: var(--bg-subtle); }
+
+        /* ── Navbar ── */
+        .navbar { background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 40; }
+        .navbar-inner { max-width: 1200px; margin: 0 auto; padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+        .navbar-brand { display: flex; align-items: center; gap: 10px; }
+        .brand-icon { width: 28px; height: 28px; background: var(--accent); color: #fff; border-radius: 7px; display: flex; align-items: center; justify-content: center; }
+        .brand-name { font-weight: 600; font-size: 15px; color: var(--text-1); letter-spacing: -0.3px; }
+        .brand-tag { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: var(--surface-2); color: var(--text-3); border: 1px solid var(--border); font-weight: 500; }
+        .navbar-right { display: flex; align-items: center; gap: 10px; }
+        .live-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; color: var(--accent); }
+
+        /* ── Summary ── */
+        .summary-bar { background: var(--surface); border-bottom: 1px solid var(--border); }
+        .summary-inner { max-width: 1200px; margin: 0 auto; padding: 0 24px; height: 44px; display: flex; align-items: center; gap: 32px; }
+        .summary-stat { display: flex; align-items: center; gap: 6px; }
+        .summary-val { font-size: 13px; font-weight: 600; color: var(--text-1); font-variant-numeric: tabular-nums; }
+        .summary-label { font-size: 12px; color: var(--text-3); }
+
+        /* ── Main ── */
+        .main { max-width: 1200px; margin: 0 auto; padding: 28px 24px; }
+        .jobs-grid { display: flex; flex-direction: column; gap: 14px; }
+
+        /* ── Empty ── */
+        .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 24px; text-align: center; gap: 14px; }
+        .empty-icon { width: 56px; height: 56px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; display: flex; align-items: center; justify-content: center; }
+        .empty-title { font-size: 18px; font-weight: 600; color: var(--text-1); }
+        .empty-desc { font-size: 14px; color: var(--text-3); max-width: 320px; line-height: 1.5; }
+
+        /* ── Job Card ── */
+        .job-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 20px; display: flex; flex-direction: column; gap: 16px; box-shadow: var(--shadow-sm); transition: box-shadow 0.15s; }
+        .job-card:hover { box-shadow: var(--shadow); }
+        .job-header { display: flex; flex-direction: column; gap: 4px; }
+        .job-title-row { display: flex; align-items: center; gap: 10px; }
+        .job-name { font-size: 15px; font-weight: 600; color: var(--text-1); letter-spacing: -0.2px; }
+        .job-meta { font-size: 12px; color: var(--text-3); }
+        .status-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+        .pulse-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+
+        /* ── Progress ── */
+        .progress-track { height: 4px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 999px; transition: width 0.5s ease; min-width: ${0}; }
+
+        /* ── Stats ── */
+        .job-stats { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+        .stat { display: flex; align-items: center; gap: 5px; }
+        .stat-val { font-size: 13px; font-weight: 600; color: var(--text-1); font-variant-numeric: tabular-nums; }
+        .stat-label { font-size: 11px; color: var(--text-3); }
+        .stat-eta { font-size: 11px; color: var(--accent); margin-left: 4px; }
+        .stat-pct { font-size: 13px; font-weight: 600; color: var(--text-1); }
+        .stat-progress { display: flex; align-items: center; gap: 5px; margin-left: auto; }
+        .stat-divider { width: 1px; height: 14px; background: var(--border); }
+
+        /* ── Actions ── */
+        .job-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid var(--border); }
+        .job-controls { display: flex; gap: 6px; }
+        .job-downloads { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+        .download-safe { color: var(--safe) !important; border-color: var(--safe) !important; }
+        .download-safe:hover { background: var(--safe-bg) !important; }
+        .download-risky { color: var(--risky) !important; border-color: var(--risky) !important; }
+        .download-risky:hover { background: var(--risky-bg) !important; }
+        .download-invalid { color: var(--invalid) !important; border-color: var(--invalid) !important; }
+        .download-invalid:hover { background: var(--invalid-bg) !important; }
+
+        /* ── Buttons ── */
+        .btn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; padding: 7px 14px; border-radius: var(--radius-sm); border: 1px solid transparent; cursor: pointer; transition: all 0.12s; white-space: nowrap; font-family: inherit; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-sm { padding: 5px 10px; font-size: 12px; }
+        .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+        .btn-ghost { background: transparent; color: var(--text-2); border-color: var(--border); }
+        .btn-ghost:hover { background: var(--surface-2); border-color: var(--border-2); }
+        .btn-danger { color: var(--invalid) !important; border-color: var(--border) !important; }
+        .btn-danger:hover { background: var(--invalid-bg) !important; border-color: var(--invalid) !important; }
+        .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent; color: var(--text-2); cursor: pointer; transition: all 0.12s; }
+        .icon-btn:hover { background: var(--surface-2); }
+
+        /* ── Modal ── */
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px; backdrop-filter: blur(2px); }
+        .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); width: 100%; max-width: 480px; box-shadow: var(--shadow-md); display: flex; flex-direction: column; gap: 20px; padding: 24px; }
+        .modal-header { display: flex; align-items: center; justify-content: space-between; }
+        .modal-title { font-size: 16px; font-weight: 600; color: var(--text-1); }
+        .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+
+        /* ── Dropzone ── */
+        .dropzone { border: 1.5px dashed var(--border-2); border-radius: var(--radius); padding: 32px 24px; display: flex; flex-direction: column; align-items: center; gap: 10px; cursor: pointer; transition: all 0.15s; text-align: center; }
+        .dropzone:hover, .dropzone.dragging { border-color: var(--accent); background: var(--accent-bg); }
+        .dropzone.has-file { border-style: solid; border-color: var(--safe); background: var(--safe-bg); }
+        .dropzone-icon { width: 42px; height: 42px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+        .dropzone-label { font-size: 14px; color: var(--text-2); font-weight: 500; }
+        .dropzone-hint { font-size: 12px; color: var(--text-3); line-height: 1.5; }
+        .dropzone-file { display: flex; align-items: center; gap: 12px; }
+        .dropzone-file-icon { width: 40px; height: 40px; background: var(--safe-bg); border: 1px solid var(--safe); border-radius: 9px; display: flex; align-items: center; justify-content: center; color: var(--safe); }
+        .dropzone-file-name { font-size: 14px; font-weight: 500; color: var(--text-1); }
+        .dropzone-file-size { font-size: 12px; color: var(--text-3); }
+
+        /* ── Fields ── */
+        .field { display: flex; flex-direction: column; gap: 8px; }
+        .field-header { display: flex; justify-content: space-between; align-items: center; }
+        .field-label { font-size: 13px; font-weight: 500; color: var(--text-1); }
+        .field-value { font-size: 13px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+        .field-hint { font-size: 12px; color: var(--text-3); line-height: 1.5; }
+        .slider { width: 100%; accent-color: var(--accent); }
+        .slider-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-4); }
+
+        /* ── Misc ── */
+        .link { color: var(--accent); text-decoration: underline; cursor: pointer; }
+        .error-msg { font-size: 13px; color: var(--invalid); background: var(--invalid-bg); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid ${`var(--invalid)`}30; }
+        code { font-family: 'Geist Mono', monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+        .hidden { display: none; }
+      `}</style>
+    </>
   );
 }

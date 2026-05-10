@@ -1,16 +1,34 @@
 version: "3.8"
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: reacher-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: reacher
+      POSTGRES_PASSWORD: reacher_secret
+      POSTGRES_DB: reacher
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - reacher-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reacher"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   reacher:
     image: reacherhq/backend:latest
     container_name: reacher-backend
+    restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       - ./backend_config.toml:/app/backend_config.toml:ro
     environment:
       - RUST_LOG=reacher=info
-    restart: unless-stopped
     networks:
       - reacher-net
 
@@ -19,16 +37,23 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: reacher-ui
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
       - REACHER_BACKEND_URL=http://reacher:8080
+      - DATABASE_URL=postgresql://reacher:reacher_secret@postgres:5432/reacher
       - NEXT_PUBLIC_APP_URL=http://localhost:3000
     depends_on:
-      - reacher
-    restart: unless-stopped
+      postgres:
+        condition: service_healthy
+      reacher:
+        condition: service_started
     networks:
       - reacher-net
+
+volumes:
+  postgres_data:
 
 networks:
   reacher-net:
