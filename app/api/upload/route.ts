@@ -35,7 +35,11 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
-    const concurrency = parseInt(formData.get("concurrency") as string) || 10;
+    const presetName = (formData.get("preset") as string) || "safe";
+    const presetMap: Record<string, number> = {
+      safe: 1, balanced: 2, fast: 3, maximum: 4,
+    };
+    const concurrency = presetMap[presetName] || 1;
     const forceSingle = formData.get("forceSingle") === "true";
 
     if (!file) return NextResponse.json({ error: "No file" }, { status: 400 });

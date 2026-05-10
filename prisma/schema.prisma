@@ -17,6 +17,7 @@ model Job {
   risky       Int      @default(0)
   invalid     Int      @default(0)
   unknown     Int      @default(0)
+  unverifiable Int     @default(0)
   status      JobStatus @default(PENDING)
   concurrency Int      @default(10)
   groupId     String?  // links part1 + part2 of same original file

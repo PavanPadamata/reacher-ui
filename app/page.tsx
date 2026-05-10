@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Upload, Sun, Moon, Play, Pause, Square, Trash2,
   Download, CheckCircle, AlertTriangle, XCircle,
-  HelpCircle, Loader2, Mail, Clock, Zap, Plus, X, LogOut
+  Loader2, Mail, Clock, Zap, Plus, X, LogOut
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ interface Job {
   risky: number;
   invalid: number;
   unknown: number;
+  unverifiable: number;
   status: JobStatus;
   concurrency: number;
   groupId: string | null;
@@ -94,12 +95,19 @@ function ThemeToggle() {
 
 function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded: () => void }) {
   const [file, setFile] = useState<File | null>(null);
-  const [concurrency, setConcurrency] = useState(10);
+  const [preset, setPreset] = useState<"safe" | "balanced" | "fast" | "maximum">("safe");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [splitInfo, setSplitInfo] = useState<{ total: number; part1: number; part2: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const PRESETS = [
+    { key: "safe",     label: "🐢 Safe",     desc: "8 total · 1 per domain · 1s cooldown",  note: "Recommended for Gmail/Yahoo heavy lists" },
+    { key: "balanced", label: "⚡ Balanced",  desc: "15 total · 2 per domain · 500ms cooldown", note: "Good for mixed lists" },
+    { key: "fast",     label: "🚀 Fast",      desc: "30 total · 3 per domain · 200ms cooldown", note: "For corporate/B2B lists" },
+    { key: "maximum",  label: "⚠️ Maximum",   desc: "50 total · 3 per domain · no cooldown", note: "Use with SMTP proxies only" },
+  ] as const;
 
   const handleFile = (f: File) => {
     if (!f.name.endsWith(".csv")) { setError("Only CSV files are supported"); return; }
@@ -115,7 +123,7 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("concurrency", String(concurrency));
+      fd.append("preset", preset);
       if (forceSingle) fd.append("forceSingle", "true");
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       const data = await res.json();
@@ -206,21 +214,23 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
           )}
         </div>
 
-        {/* Concurrency */}
+        {/* Preset selector */}
         <div className="field">
-          <div className="field-header">
-            <label className="field-label">Concurrency</label>
-            <span className="field-value">{concurrency} parallel</span>
+          <label className="field-label">Speed Preset</label>
+          <div className="preset-grid">
+            {PRESETS.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => setPreset(p.key)}
+                className={`preset-card${preset === p.key ? " active" : ""}`}
+              >
+                <span className="preset-label">{p.label}</span>
+                <span className="preset-desc">{p.desc}</span>
+                <span className="preset-note">{p.note}</span>
+              </button>
+            ))}
           </div>
-          <input
-            type="range" min={1} max={50} value={concurrency}
-            onChange={(e) => setConcurrency(Number(e.target.value))}
-            className="slider"
-          />
-          <div className="slider-labels">
-            <span>1 (safe)</span><span>25</span><span>50 (fast)</span>
-          </div>
-          <p className="field-hint">Higher = faster but more likely to be rate-limited by Gmail/Yahoo.</p>
         </div>
 
         {error && <p className="error-msg">{error}</p>}
@@ -258,8 +268,8 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
     onAction();
   };
 
-  const download = (status: string) => {
-    window.open(`/api/jobs/${job.id}/download?status=${status}`, "_blank");
+  const download = (bucket: string) => {
+    window.open(`/api/jobs/${job.id}/download?bucket=${bucket}`, "_blank");
   };
 
   return (
@@ -273,7 +283,7 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
             {sc.label}
           </span>
         </div>
-        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · {job.concurrency} concurrent</p>
+        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · { {1:"🐢 Safe", 2:"⚡ Balanced", 3:"🚀 Fast", 4:"⚠️ Maximum"}[job.concurrency] || "Custom" }</p>
       </div>
 
       {/* Progress bar */}
@@ -288,23 +298,18 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
       <div className="job-stats">
         <div className="stat">
           <CheckCircle size={13} style={{ color: "var(--safe)" }} />
-          <span className="stat-val" style={{ color: "var(--safe)" }}>{fmt(job.safe)}</span>
-          <span className="stat-label">Safe</span>
+          <span className="stat-val" style={{ color: "var(--safe)" }}>{fmt(job.safe + job.risky + job.unverifiable)}</span>
+          <span className="stat-label">Valid</span>
         </div>
         <div className="stat">
           <AlertTriangle size={13} style={{ color: "var(--risky)" }} />
-          <span className="stat-val" style={{ color: "var(--risky)" }}>{fmt(job.risky)}</span>
-          <span className="stat-label">Risky</span>
+          <span className="stat-val" style={{ color: "var(--risky)" }}>{fmt(job.unknown)}</span>
+          <span className="stat-label">Review</span>
         </div>
         <div className="stat">
           <XCircle size={13} style={{ color: "var(--invalid)" }} />
           <span className="stat-val" style={{ color: "var(--invalid)" }}>{fmt(job.invalid)}</span>
           <span className="stat-label">Invalid</span>
-        </div>
-        <div className="stat">
-          <HelpCircle size={13} style={{ color: "var(--unknown)" }} />
-          <span className="stat-val" style={{ color: "var(--unknown)" }}>{fmt(job.unknown)}</span>
-          <span className="stat-label">Unknown</span>
         </div>
         <div className="stat-divider" />
         <div className="stat">
@@ -351,17 +356,14 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
         <div className="job-downloads">
           {(isDone || job.processed > 0) && (
             <>
-              <button className="btn btn-ghost btn-sm download-safe" onClick={() => download("safe")}>
-                <Download size={12} /> Safe ({fmt(job.safe)})
+              <button className="btn btn-ghost btn-sm download-safe" onClick={() => download("valid")}>
+                <Download size={12} /> Valid ({fmt(job.safe + job.risky + job.unverifiable)})
               </button>
-              <button className="btn btn-ghost btn-sm download-risky" onClick={() => download("risky")}>
-                <Download size={12} /> Risky ({fmt(job.risky)})
+              <button className="btn btn-ghost btn-sm download-risky" onClick={() => download("review")}>
+                <Download size={12} /> Review ({fmt(job.unknown)})
               </button>
               <button className="btn btn-ghost btn-sm download-invalid" onClick={() => download("invalid")}>
                 <Download size={12} /> Invalid ({fmt(job.invalid)})
-              </button>
-              <button className="btn btn-ghost btn-sm" onClick={() => download("all")}>
-                <Download size={12} /> All
               </button>
             </>
           )}
@@ -378,32 +380,29 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
 
 function MergedDownloadBar({ groupId, jobs }: { groupId: string; jobs: Job[] }) {
   const allDone = jobs.every((j) => ["COMPLETED", "STOPPED"].includes(j.status));
-  const totalSafe = jobs.reduce((a, j) => a + j.safe, 0);
-  const totalRisky = jobs.reduce((a, j) => a + j.risky, 0);
+  const totalValid = jobs.reduce((a, j) => a + j.safe + j.risky + j.unverifiable, 0);
+  const totalReview = jobs.reduce((a, j) => a + j.unknown, 0);
   const totalInvalid = jobs.reduce((a, j) => a + j.invalid, 0);
   const baseName = jobs[0]?.name.replace(/_part\d+$/, "") || "merged";
 
-  const dl = (status: string) => window.open(`/api/groups/${groupId}/download?status=${status}`, "_blank");
+  const dl = (bucket: string) => window.open(`/api/groups/${groupId}/download?bucket=${bucket}`, "_blank");
 
   return (
     <div className="merged-bar">
       <div className="merged-label">
         <span className="merged-icon">🔗</span>
-        <span className="merged-title">{baseName} — Merged Download</span>
+        <span className="merged-title">{baseName} — Merged</span>
         {!allDone && <span className="merged-hint">(available when both parts complete)</span>}
       </div>
       <div className="merged-downloads">
-        <button className="btn btn-ghost btn-sm download-safe" onClick={() => dl("safe")} disabled={!allDone}>
-          <Download size={12} /> Safe ({fmt(totalSafe)})
+        <button className="btn btn-ghost btn-sm download-safe" onClick={() => dl("valid")} disabled={!allDone}>
+          <Download size={12} /> Valid ({fmt(totalValid)})
         </button>
-        <button className="btn btn-ghost btn-sm download-risky" onClick={() => dl("risky")} disabled={!allDone}>
-          <Download size={12} /> Risky ({fmt(totalRisky)})
+        <button className="btn btn-ghost btn-sm download-risky" onClick={() => dl("review")} disabled={!allDone}>
+          <Download size={12} /> Review ({fmt(totalReview)})
         </button>
         <button className="btn btn-ghost btn-sm download-invalid" onClick={() => dl("invalid")} disabled={!allDone}>
           <Download size={12} /> Invalid ({fmt(totalInvalid)})
-        </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => dl("all")} disabled={!allDone}>
-          <Download size={12} /> All Merged
         </button>
       </div>
     </div>
@@ -626,6 +625,8 @@ export default function Dashboard() {
         .download-risky:hover { background: var(--risky-bg) !important; }
         .download-invalid { color: var(--invalid) !important; border-color: var(--invalid) !important; }
         .download-invalid:hover { background: var(--invalid-bg) !important; }
+        .download-unverifiable { color: var(--text-3) !important; border-color: var(--border-2) !important; }
+        .download-unverifiable:hover { background: var(--surface-2) !important; }
 
         /* ── Buttons ── */
         .btn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; padding: 7px 14px; border-radius: var(--radius-sm); border: 1px solid transparent; cursor: pointer; transition: all 0.12s; white-space: nowrap; font-family: inherit; }
@@ -673,6 +674,14 @@ export default function Dashboard() {
         .error-msg { font-size: 13px; color: var(--invalid); background: var(--invalid-bg); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid ${`var(--invalid)`}30; }
         code { font-family: 'Geist Mono', monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
         .hidden { display: none; }
+        /* ── Preset cards ── */
+        .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .preset-card { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; text-align: left; transition: all 0.12s; font-family: inherit; }
+        .preset-card:hover { border-color: var(--border-2); background: var(--surface-2); }
+        .preset-card.active { border-color: var(--accent); background: var(--accent-bg); }
+        .preset-label { font-size: 13px; font-weight: 600; color: var(--text-1); }
+        .preset-desc { font-size: 11px; color: var(--text-3); font-family: 'Geist Mono', monospace; }
+        .preset-note { font-size: 11px; color: var(--text-4); margin-top: 2px; }
         /* ── Split info ── */
         .split-info { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
         .split-icon { font-size: 28px; }

@@ -23,6 +23,7 @@ export async function GET() {
       risky: true,
       invalid: true,
       unknown: true,
+      unverifiable: true,
       status: true,
       concurrency: true,
       groupId: true,

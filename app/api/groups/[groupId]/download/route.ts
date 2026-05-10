@@ -3,10 +3,17 @@ import { prisma } from "@/lib/prisma";
 
 type Params = { params: Promise<{ groupId: string }> };
 
+const BUCKET_MAP: Record<string, string[]> = {
+  valid:   ["safe", "risky", "unverifiable"],
+  review:  ["unknown", "error"],
+  invalid: ["invalid"],
+  all:     ["safe", "risky", "unverifiable", "unknown", "error", "invalid"],
+};
+
 export async function GET(req: NextRequest, { params }: Params) {
   const { groupId } = await params;
   const url = new URL(req.url);
-  const statusFilter = url.searchParams.get("status") || "safe";
+  const bucket = url.searchParams.get("bucket") || "all";
 
   const jobs = await prisma.job.findMany({
     where: { groupId },
@@ -20,26 +27,17 @@ export async function GET(req: NextRequest, { params }: Params) {
 
   const jobIds = jobs.map((j) => j.id);
   const baseName = jobs[0].name.replace(/_part\d+$/, "");
-
-  const where: { jobId: { in: string[] }; status?: { in: string[] } } = {
-    jobId: { in: jobIds },
-  };
-
-  if (statusFilter !== "all") {
-    where.status = statusFilter === "unknown"
-      ? { in: ["unknown", "error"] }
-      : { in: [statusFilter] };
-  }
+  const statuses = BUCKET_MAP[bucket] || BUCKET_MAP.all;
 
   const results = await prisma.result.findMany({
-    where,
+    where: { jobId: { in: jobIds }, status: { in: statuses } },
     select: { email: true, name: true, status: true },
     orderBy: { email: "asc" },
   });
 
-  const header = "email,name,status\n";
-  const rows = results.map((r) => [r.email, r.name, r.status].join(",")).join("\n");
-  const filename = `${baseName}_merged_${statusFilter}.csv`;
+  const header = "email,name\n";
+  const rows = results.map((r) => [r.email, r.name].join(",")).join("\n");
+  const filename = `${baseName}_merged_${bucket}.csv`;
 
   return new NextResponse(header + rows, {
     headers: {
