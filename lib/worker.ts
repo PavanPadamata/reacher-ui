@@ -28,12 +28,9 @@ const UNVERIFIABLE_MX_PATTERNS = [
   "trendmicro.com",
 ];
 
-// ── Per-job caches ─────────────────────────────────────────────────────────
+// ── DNS caches ─────────────────────────────────────────────────────────────
 const mxCache = new Map<string, boolean>();
-// Track MX exchange per domain for per-domain limiting
 const domainMxCache = new Map<string, string>();
-// Per-job, per-MX active connection count
-const domainActive = new Map<string, number>();
 
 async function getDomainMx(domain: string): Promise<string> {
   if (domainMxCache.has(domain)) return domainMxCache.get(domain)!;
@@ -65,18 +62,43 @@ async function isUnverifiableDomain(email: string): Promise<boolean> {
   }
 }
 
-// ── Job signals ────────────────────────────────────────────────────────────
-const jobSignals = new Map<string, "pause" | "stop" | null>();
+// ── Job control ────────────────────────────────────────────────────────────
+// Each job has a control state: running | paused | stopped
+type JobControl = "running" | "paused" | "stopped";
+const jobControl = new Map<string, JobControl>();
 
 export function signalJob(jobId: string, signal: "pause" | "stop" | null) {
-  jobSignals.set(jobId, signal);
+  if (signal === "pause")  jobControl.set(jobId, "paused");
+  else if (signal === "stop")   jobControl.set(jobId, "stopped");
+  else                          jobControl.set(jobId, "running");
 }
 
 export function getJobSignal(jobId: string) {
-  return jobSignals.get(jobId) ?? null;
+  return jobControl.get(jobId) ?? null;
 }
 
-// ── Reacher verification ───────────────────────────────────────────────────
+// Wait until job is unpaused or stopped — called before processing each email
+async function waitIfPaused(jobId: string): Promise<boolean> {
+  const state = jobControl.get(jobId);
+  if (state === "stopped") return false; // signal caller to stop
+  if (state !== "paused") return true;  // running, proceed
+
+  // Update DB status to PAUSED
+  await prisma.job.update({ where: { id: jobId }, data: { status: "PAUSED" } });
+
+  // Poll every 500ms until resumed or stopped
+  while (jobControl.get(jobId) === "paused") {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  if (jobControl.get(jobId) === "stopped") return false;
+
+  // Resumed — update DB back to RUNNING
+  await prisma.job.update({ where: { id: jobId }, data: { status: "RUNNING" } });
+  return true;
+}
+
+// ── Reacher call ───────────────────────────────────────────────────────────
 async function verifyEmail(email: string): Promise<Record<string, unknown>> {
   const res = await fetch(`${REACHER_URL}/v0/check_email`, {
     method: "POST",
@@ -90,14 +112,16 @@ async function verifyEmail(email: string): Promise<Record<string, unknown>> {
 
 function classifyResult(data: Record<string, unknown>): string {
   const r = data.is_reachable as string;
-  if (r === "safe") return "safe";
-  if (r === "risky") return "risky";
+  if (r === "safe")    return "safe";
+  if (r === "risky")   return "risky";
   if (r === "invalid") return "invalid";
   return "unknown";
 }
 
 // ── Main job runner ────────────────────────────────────────────────────────
 export async function runJob(jobId: string) {
+  jobControl.set(jobId, "running");
+
   await prisma.job.update({
     where: { id: jobId },
     data: { status: "RUNNING", startedAt: new Date() },
@@ -119,166 +143,153 @@ export async function runJob(jobId: string) {
     return;
   }
 
-  // Get preset config — stored as preset name in concurrency field
-  // We store preset index: 1=safe, 2=balanced, 3=fast, 4=maximum
   const presetMap: Record<number, ConcurrencyPreset> = {
     1: "safe", 2: "balanced", 3: "fast", 4: "maximum",
   };
-  const preset = presetMap[job.concurrency] || "safe";
-  const config = CONCURRENCY_PRESETS[preset];
+  const config = CONCURRENCY_PRESETS[presetMap[job.concurrency] || "safe"];
 
-  const queue = [...allResults];
+  // ── Semaphore for total + per-domain concurrency ───────────────────────
   let totalActive = 0;
-  let stopped = false;
-  let paused = false;
-
-  // Per-MX active count for this job
   const mxActive = new Map<string, number>();
-  const getMxActive = (mx: string) => mxActive.get(mx) || 0;
-  const incMxActive = (mx: string) => mxActive.set(mx, getMxActive(mx) + 1);
-  const decMxActive = (mx: string) => mxActive.set(mx, Math.max(0, getMxActive(mx) - 1));
-
-  // Last probe time per MX for cooldown
   const mxLastProbe = new Map<string, number>();
 
-  await new Promise<void>((resolve) => {
-    async function processNext() {
-      const signal = jobSignals.get(jobId);
-      if (signal === "stop") { stopped = true; resolve(); return; }
+  const getMxActive  = (mx: string) => mxActive.get(mx) || 0;
+  const incMxActive  = (mx: string) => mxActive.set(mx, getMxActive(mx) + 1);
+  const decMxActive  = (mx: string) => mxActive.set(mx, Math.max(0, getMxActive(mx) - 1));
 
-      if (signal === "pause") {
-        paused = true;
-        await prisma.job.update({ where: { id: jobId }, data: { status: "PAUSED" } });
-        while (jobSignals.get(jobId) === "pause") {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-        if (jobSignals.get(jobId) === "stop") { stopped = true; resolve(); return; }
-        paused = false;
-        await prisma.job.update({ where: { id: jobId }, data: { status: "RUNNING" } });
+  // Process one email — returns false if job should stop
+  async function processOne(item: { id: string; email: string; name: string }, mx: string): Promise<void> {
+    try {
+      const unverifiable = await isUnverifiableDomain(item.email);
+
+      if (unverifiable) {
+        await prisma.result.update({
+          where: { id: item.id },
+          data: { status: "unverifiable", isReachable: "unverifiable" },
+        });
+        await prisma.job.update({
+          where: { id: jobId },
+          data: { processed: { increment: 1 }, unverifiable: { increment: 1 } },
+        });
+      } else {
+        const data = await verifyEmail(item.email);
+        const status = classifyResult(data);
+        const smtp = (data.smtp as Record<string, unknown>) || {};
+        const misc = (data.misc as Record<string, unknown>) || {};
+        const mx2  = (data.mx   as Record<string, unknown>) || {};
+
+        await prisma.result.update({
+          where: { id: item.id },
+          data: {
+            status,
+            isReachable:     (data.is_reachable as string)   || "",
+            isDisposable:    (misc.is_disposable as boolean)  || false,
+            isRoleAccount:   (misc.is_role_account as boolean)|| false,
+            isCatchAll:      (smtp.is_catch_all as boolean)   || false,
+            mxAcceptsMail:   (mx2.accepts_mail as boolean)    || false,
+            smtpDeliverable: (smtp.is_deliverable as boolean) || false,
+            smtpDisabled:    (smtp.is_disabled as boolean)    || false,
+          },
+        });
+
+        await prisma.job.update({
+          where: { id: jobId },
+          data: {
+            processed: { increment: 1 },
+            ...(status === "safe"    && { safe:    { increment: 1 } }),
+            ...(status === "risky"   && { risky:   { increment: 1 } }),
+            ...(status === "invalid" && { invalid: { increment: 1 } }),
+            ...(status === "unknown" && { unknown: { increment: 1 } }),
+          },
+        });
       }
-
-      // Try to fill up to total concurrency
-      let scheduled = false;
-      for (let i = 0; i < queue.length && totalActive < config.total; i++) {
-        const item = queue[i];
-        const domain = item.email.split("@")[1]?.toLowerCase() || "";
-        const mx = await getDomainMx(domain);
-
-        // Check per-domain limit
-        if (getMxActive(mx) >= config.perDomain) continue;
-
-        // Check cooldown
-        const lastProbe = mxLastProbe.get(mx) || 0;
-        const timeSince = Date.now() - lastProbe;
-        if (config.cooldownMs > 0 && timeSince < config.cooldownMs) continue;
-
-        // This item is eligible — remove from queue and process
-        queue.splice(i, 1);
-        totalActive++;
-        incMxActive(mx);
-        mxLastProbe.set(mx, Date.now());
-        scheduled = true;
-
-        // Process in background
-        (async () => {
-          try {
-            const unverifiable = await isUnverifiableDomain(item.email);
-
-            if (unverifiable) {
-              await prisma.result.update({
-                where: { id: item.id },
-                data: { status: "unverifiable", isReachable: "unverifiable" },
-              });
-              await prisma.job.update({
-                where: { id: jobId },
-                data: { processed: { increment: 1 }, unverifiable: { increment: 1 } },
-              });
-            } else {
-              const data = await verifyEmail(item.email);
-              const status = classifyResult(data);
-              const smtp = (data.smtp as Record<string, unknown>) || {};
-              const misc = (data.misc as Record<string, unknown>) || {};
-              const mx2 = (data.mx as Record<string, unknown>) || {};
-
-              await prisma.result.update({
-                where: { id: item.id },
-                data: {
-                  status,
-                  isReachable: (data.is_reachable as string) || "",
-                  isDisposable: (misc.is_disposable as boolean) || false,
-                  isRoleAccount: (misc.is_role_account as boolean) || false,
-                  isCatchAll: (smtp.is_catch_all as boolean) || false,
-                  mxAcceptsMail: (mx2.accepts_mail as boolean) || false,
-                  smtpDeliverable: (smtp.is_deliverable as boolean) || false,
-                  smtpDisabled: (smtp.is_disabled as boolean) || false,
-                },
-              });
-
-              await prisma.job.update({
-                where: { id: jobId },
-                data: {
-                  processed: { increment: 1 },
-                  ...(status === "safe"    && { safe:    { increment: 1 } }),
-                  ...(status === "risky"   && { risky:   { increment: 1 } }),
-                  ...(status === "invalid" && { invalid: { increment: 1 } }),
-                  ...(status === "unknown" && { unknown: { increment: 1 } }),
-                },
-              });
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : "error";
-            await prisma.result.update({
-              where: { id: item.id },
-              data: { status: "error", rawError: msg },
-            });
-            await prisma.job.update({
-              where: { id: jobId },
-              data: { processed: { increment: 1 }, unknown: { increment: 1 } },
-            });
-          } finally {
-            totalActive--;
-            decMxActive(mx);
-            if (queue.length === 0 && totalActive === 0) {
-              resolve();
-            } else {
-              // Small delay then try to schedule more
-              setTimeout(processNext, config.cooldownMs > 0 ? 100 : 0);
-            }
-          }
-        })();
-
-        // Break out to re-evaluate queue after scheduling one
-        break;
-      }
-
-      // If nothing was scheduled but queue has items, retry after cooldown
-      if (!scheduled && queue.length > 0 && totalActive < config.total) {
-        setTimeout(processNext, 200);
-      }
-
-      // If queue empty and nothing active, we're done
-      if (queue.length === 0 && totalActive === 0) {
-        resolve();
-      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "error";
+      await prisma.result.update({
+        where: { id: item.id },
+        data: { status: "error", rawError: msg },
+      });
+      await prisma.job.update({
+        where: { id: jobId },
+        data: { processed: { increment: 1 }, unknown: { increment: 1 } },
+      });
+    } finally {
+      totalActive--;
+      decMxActive(mx);
     }
-
-    // Kick off initial batch
-    for (let i = 0; i < config.total; i++) {
-      setTimeout(processNext, i * 50);
-    }
-  });
-
-  if (stopped) {
-    await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
-  } else if (!paused) {
-    await prisma.job.update({
-      where: { id: jobId },
-      data: { status: "COMPLETED", finishedAt: new Date() },
-    });
   }
 
-  jobSignals.delete(jobId);
+  // ── Main scheduling loop ───────────────────────────────────────────────
+  let idx = 0;
+  const queue = [...allResults];
+
+  while (idx < queue.length || totalActive > 0) {
+    // Check stop signal
+    if (jobControl.get(jobId) === "stopped") {
+      // Wait for active requests to finish
+      while (totalActive > 0) await new Promise((r) => setTimeout(r, 200));
+      await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
+      jobControl.delete(jobId);
+      mxCache.clear(); domainMxCache.clear();
+      return;
+    }
+
+    // Check pause signal — wait until resumed
+    if (jobControl.get(jobId) === "paused") {
+      const ok = await waitIfPaused(jobId);
+      if (!ok) {
+        while (totalActive > 0) await new Promise((r) => setTimeout(r, 200));
+        await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
+        jobControl.delete(jobId);
+        mxCache.clear(); domainMxCache.clear();
+        return;
+      }
+      continue;
+    }
+
+    // Try to schedule next eligible email
+    if (idx < queue.length && totalActive < config.total) {
+      const item = queue[idx];
+      const domain = item.email.split("@")[1]?.toLowerCase() || "";
+      const mx = await getDomainMx(domain);
+
+      // Check per-domain limit
+      if (getMxActive(mx) >= config.perDomain) {
+        // Can't send to this MX right now — try next item
+        // Simple round: move to end and increment
+        queue.push(queue.splice(idx, 1)[0]);
+        // Avoid infinite spin if all items are blocked
+        await new Promise((r) => setTimeout(r, 50));
+        continue;
+      }
+
+      // Check cooldown
+      const lastProbe = mxLastProbe.get(mx) || 0;
+      const timeSince = Date.now() - lastProbe;
+      if (config.cooldownMs > 0 && timeSince < config.cooldownMs) {
+        await new Promise((r) => setTimeout(r, config.cooldownMs - timeSince));
+        continue;
+      }
+
+      // Schedule this item
+      idx++;
+      totalActive++;
+      incMxActive(mx);
+      mxLastProbe.set(mx, Date.now());
+      processOne(item, mx); // fire and forget — tracking via totalActive
+    } else {
+      // Either at concurrency limit or waiting for active to finish
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  // All done
+  await prisma.job.update({
+    where: { id: jobId },
+    data: { status: "COMPLETED", finishedAt: new Date() },
+  });
+
+  jobControl.delete(jobId);
   mxCache.clear();
   domainMxCache.clear();
-  domainActive.clear();
 }

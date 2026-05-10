@@ -95,19 +95,21 @@ function ThemeToggle() {
 
 function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded: () => void }) {
   const [file, setFile] = useState<File | null>(null);
-  const [preset, setPreset] = useState<"safe" | "balanced" | "fast" | "maximum">("safe");
+  const [listType, setListType] = useState<"healthcare" | "corporate" | "mixed" | "consumer">("mixed");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [splitInfo, setSplitInfo] = useState<{ total: number; part1: number; part2: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const PRESETS = [
-    { key: "safe",     label: "🐢 Safe",     desc: "8 total · 1 per domain · 1s cooldown",  note: "Recommended for Gmail/Yahoo heavy lists" },
-    { key: "balanced", label: "⚡ Balanced",  desc: "15 total · 2 per domain · 500ms cooldown", note: "Good for mixed lists" },
-    { key: "fast",     label: "🚀 Fast",      desc: "30 total · 3 per domain · 200ms cooldown", note: "For corporate/B2B lists" },
-    { key: "maximum",  label: "⚠️ Maximum",   desc: "50 total · 3 per domain · no cooldown", note: "Use with SMTP proxies only" },
+  const LIST_TYPES = [
+    { key: "healthcare", icon: "🏥", label: "Healthcare / Medical", desc: "Hospitals, clinics, medical practices",       preset: "safe",     risk: "Most accurate for M365-heavy lists" },
+    { key: "corporate",  icon: "🏢", label: "Corporate / B2B",      desc: "Businesses, agencies, SaaS companies",        preset: "balanced", risk: "Good speed for business domains" },
+    { key: "mixed",      icon: "📧", label: "Mixed List",            desc: "Gmail, Yahoo, corporate and other emails",    preset: "safe",     risk: "Protects IP on consumer providers" },
+    { key: "consumer",   icon: "⚡", label: "Consumer Email",        desc: "Mostly Gmail, Yahoo, Outlook accounts",       preset: "safe",     risk: "Gmail and Yahoo rate-limit fast" },
   ] as const;
+
+  const selected = LIST_TYPES.find((t) => t.key === listType) || LIST_TYPES[2];
 
   const handleFile = (f: File) => {
     if (!f.name.endsWith(".csv")) { setError("Only CSV files are supported"); return; }
@@ -123,7 +125,7 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("preset", preset);
+      fd.append("preset", selected.preset);
       if (forceSingle) fd.append("forceSingle", "true");
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       const data = await res.json();
@@ -214,23 +216,26 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
           )}
         </div>
 
-        {/* Preset selector */}
+        {/* List type picker */}
         <div className="field">
-          <label className="field-label">Speed Preset</label>
-          <div className="preset-grid">
-            {PRESETS.map((p) => (
+          <label className="field-label">What type of list is this?</label>
+          <div className="listtype-grid">
+            {LIST_TYPES.map((t) => (
               <button
-                key={p.key}
+                key={t.key}
                 type="button"
-                onClick={() => setPreset(p.key)}
-                className={`preset-card${preset === p.key ? " active" : ""}`}
+                onClick={() => setListType(t.key)}
+                className={`listtype-btn${listType === t.key ? " active" : ""}`}
               >
-                <span className="preset-label">{p.label}</span>
-                <span className="preset-desc">{p.desc}</span>
-                <span className="preset-note">{p.note}</span>
+                <span className="listtype-icon">{t.icon}</span>
+                <div className="listtype-text">
+                  <span className="listtype-label">{t.label}</span>
+                  <span className="listtype-desc">{t.desc}</span>
+                </div>
               </button>
             ))}
           </div>
+          <p className="listtype-hint">✓ {selected.risk}</p>
         </div>
 
         {error && <p className="error-msg">{error}</p>}
@@ -283,7 +288,7 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
             {sc.label}
           </span>
         </div>
-        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · { {1:"🐢 Safe", 2:"⚡ Balanced", 3:"🚀 Fast", 4:"⚠️ Maximum"}[job.concurrency] || "Custom" }</p>
+        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · { {1:"🏥 Healthcare", 2:"🏢 Corporate", 3:"📧 Mixed", 4:"⚡ Consumer"}[job.concurrency] || "🐢 Safe" }</p>
       </div>
 
       {/* Progress bar */}
@@ -674,14 +679,16 @@ export default function Dashboard() {
         .error-msg { font-size: 13px; color: var(--invalid); background: var(--invalid-bg); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid ${`var(--invalid)`}30; }
         code { font-family: 'Geist Mono', monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
         .hidden { display: none; }
-        /* ── Preset cards ── */
-        .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .preset-card { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; text-align: left; transition: all 0.12s; font-family: inherit; }
-        .preset-card:hover { border-color: var(--border-2); background: var(--surface-2); }
-        .preset-card.active { border-color: var(--accent); background: var(--accent-bg); }
-        .preset-label { font-size: 13px; font-weight: 600; color: var(--text-1); }
-        .preset-desc { font-size: 11px; color: var(--text-3); font-family: 'Geist Mono', monospace; }
-        .preset-note { font-size: 11px; color: var(--text-4); margin-top: 2px; }
+        /* ── List type picker ── */
+        .listtype-grid { display: flex; flex-direction: column; gap: 6px; }
+        .listtype-btn { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 9px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; text-align: left; transition: all 0.12s; font-family: inherit; width: 100%; }
+        .listtype-btn:hover { border-color: var(--border-2); background: var(--surface-2); }
+        .listtype-btn.active { border-color: var(--accent); background: var(--accent-bg); }
+        .listtype-icon { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; }
+        .listtype-text { display: flex; flex-direction: column; gap: 1px; }
+        .listtype-label { font-size: 13px; font-weight: 600; color: var(--text-1); }
+        .listtype-desc { font-size: 12px; color: var(--text-3); }
+        .listtype-hint { font-size: 12px; color: var(--safe); margin-top: 6px; font-weight: 500; }
         /* ── Split info ── */
         .split-info { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
         .split-icon { font-size: 28px; }
