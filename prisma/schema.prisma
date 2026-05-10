@@ -54,3 +54,10 @@ enum JobStatus {
   STOPPED
   FAILED
 }
+
+model Admin {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String   // bcrypt hashed
+  createdAt DateTime @default(now())
+}

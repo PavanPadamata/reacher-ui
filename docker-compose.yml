@@ -44,6 +44,7 @@ services:
       - REACHER_BACKEND_URL=http://reacher:8080
       - DATABASE_URL=postgresql://reacher:reacher_secret@postgres:5432/reacher
       - NEXT_PUBLIC_APP_URL=http://localhost:3000
+      - AUTH_SECRET=change-this-to-a-random-secret-string-min-32-chars
     depends_on:
       postgres:
         condition: service_healthy

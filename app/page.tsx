@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Upload, Sun, Moon, Play, Pause, Square, Trash2,
   Download, CheckCircle, AlertTriangle, XCircle,
-  HelpCircle, Loader2, Mail, Clock, Zap, Plus, X
+  HelpCircle, Loader2, Mail, Clock, Zap, Plus, X, LogOut
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -343,6 +343,11 @@ export default function Dashboard() {
     finally { setLoading(false); }
   }, []);
 
+  const logout = async () => {
+    await fetch("/api/auth?action=logout", { method: "POST" });
+    window.location.href = "/login";
+  };
+
   useEffect(() => {
     fetchJobs();
     intervalRef.current = setInterval(fetchJobs, 3000);
@@ -374,6 +379,9 @@ export default function Dashboard() {
               <ThemeToggle />
               <button className="btn btn-primary btn-sm" onClick={() => setShowUpload(true)}>
                 <Plus size={14} /> New Job
+              </button>
+              <button className="icon-btn" onClick={logout} title="Sign out">
+                <LogOut size={15} />
               </button>
             </div>
           </div>
