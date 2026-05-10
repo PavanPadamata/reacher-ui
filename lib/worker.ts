@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { dns } from "node:dns/promises";
+import { resolveMx } from "node:dns/promises";
 
 const REACHER_URL = process.env.REACHER_BACKEND_URL || "http://localhost:8080";
 
@@ -38,7 +38,7 @@ const domainActive = new Map<string, number>();
 async function getDomainMx(domain: string): Promise<string> {
   if (domainMxCache.has(domain)) return domainMxCache.get(domain)!;
   try {
-    const records = await dns.resolveMx(domain);
+    const records = await resolveMx(domain);
     const mx = records.sort((a, b) => a.priority - b.priority)[0]?.exchange || domain;
     domainMxCache.set(domain, mx);
     return mx;
@@ -53,7 +53,7 @@ async function isUnverifiableDomain(email: string): Promise<boolean> {
   if (!domain) return false;
   if (mxCache.has(domain)) return mxCache.get(domain)!;
   try {
-    const records = await dns.resolveMx(domain);
+    const records = await resolveMx(domain);
     const isEnterprise = records.some((r) =>
       UNVERIFIABLE_MX_PATTERNS.some((p) => r.exchange.toLowerCase().includes(p))
     );
