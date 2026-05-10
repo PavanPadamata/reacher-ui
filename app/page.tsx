@@ -23,6 +23,8 @@ interface Job {
   unknown: number;
   status: JobStatus;
   concurrency: number;
+  groupId: string | null;
+  partNumber: number | null;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;
@@ -96,15 +98,17 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [splitInfo, setSplitInfo] = useState<{ total: number; part1: number; part2: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (f: File) => {
     if (!f.name.endsWith(".csv")) { setError("Only CSV files are supported"); return; }
     setFile(f);
     setError("");
+    setSplitInfo(null);
   };
 
-  const submit = async () => {
+  const upload = async (forceSingle = false) => {
     if (!file) return;
     setLoading(true);
     setError("");
@@ -112,9 +116,15 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
       const fd = new FormData();
       fd.append("file", file);
       fd.append("concurrency", String(concurrency));
+      if (forceSingle) fd.append("forceSingle", "true");
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      if (data.requiresSplit) {
+        setSplitInfo({ total: data.total, part1: data.part1, part2: data.part2 });
+        setLoading(false);
+        return;
+      }
       onUploaded();
       onClose();
     } catch (e) {
@@ -123,6 +133,44 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
       setLoading(false);
     }
   };
+
+  // Split confirmation screen
+  if (splitInfo) return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Large list detected</h2>
+          <button className="icon-btn" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="split-info">
+          <div className="split-icon">⚡</div>
+          <p className="split-title">This list has <strong>{fmt(splitInfo.total)}</strong> emails</p>
+          <p className="split-desc">For best reliability we recommend splitting into 2 jobs of ~500k each. Both jobs will appear in the dashboard and you can start them independently.</p>
+          <div className="split-preview">
+            <div className="split-part">
+              <span className="split-part-label">Part 1</span>
+              <span className="split-part-count">{fmt(splitInfo.part1)} emails</span>
+            </div>
+            <div className="split-divider">+</div>
+            <div className="split-part">
+              <span className="split-part-label">Part 2</span>
+              <span className="split-part-count">{fmt(splitInfo.part2)} emails</span>
+            </div>
+          </div>
+          <p className="split-hint">A merged download option will appear once both parts are done.</p>
+        </div>
+        {error && <p className="error-msg">{error}</p>}
+        <div className="modal-footer">
+          <button className="btn btn-ghost" onClick={() => upload(true)} disabled={loading}>
+            {loading ? <Loader2 size={14} className="spin" /> : null} Single job anyway
+          </button>
+          <button className="btn btn-primary" onClick={() => upload(false)} disabled={loading}>
+            {loading ? <Loader2 size={14} className="spin" /> : "✂️"} Split into 2 jobs
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -179,7 +227,7 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
 
         <div className="modal-footer">
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={submit} disabled={!file || loading}>
+          <button className="btn btn-primary" onClick={() => upload(false)} disabled={!file || loading}>
             {loading ? <><Loader2 size={14} className="spin" /> Uploading…</> : <><Plus size={14} /> Create Job</>}
           </button>
         </div>
@@ -326,6 +374,42 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
   );
 }
 
+// ── Merged Download Bar ───────────────────────────────────────────────────────
+
+function MergedDownloadBar({ groupId, jobs }: { groupId: string; jobs: Job[] }) {
+  const allDone = jobs.every((j) => ["COMPLETED", "STOPPED"].includes(j.status));
+  const totalSafe = jobs.reduce((a, j) => a + j.safe, 0);
+  const totalRisky = jobs.reduce((a, j) => a + j.risky, 0);
+  const totalInvalid = jobs.reduce((a, j) => a + j.invalid, 0);
+  const baseName = jobs[0]?.name.replace(/_part\d+$/, "") || "merged";
+
+  const dl = (status: string) => window.open(`/api/groups/${groupId}/download?status=${status}`, "_blank");
+
+  return (
+    <div className="merged-bar">
+      <div className="merged-label">
+        <span className="merged-icon">🔗</span>
+        <span className="merged-title">{baseName} — Merged Download</span>
+        {!allDone && <span className="merged-hint">(available when both parts complete)</span>}
+      </div>
+      <div className="merged-downloads">
+        <button className="btn btn-ghost btn-sm download-safe" onClick={() => dl("safe")} disabled={!allDone}>
+          <Download size={12} /> Safe ({fmt(totalSafe)})
+        </button>
+        <button className="btn btn-ghost btn-sm download-risky" onClick={() => dl("risky")} disabled={!allDone}>
+          <Download size={12} /> Risky ({fmt(totalRisky)})
+        </button>
+        <button className="btn btn-ghost btn-sm download-invalid" onClick={() => dl("invalid")} disabled={!allDone}>
+          <Download size={12} /> Invalid ({fmt(totalInvalid)})
+        </button>
+        <button className="btn btn-ghost btn-sm" onClick={() => dl("all")} disabled={!allDone}>
+          <Download size={12} /> All Merged
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -427,10 +511,44 @@ export default function Dashboard() {
               </button>
             </div>
           ) : (
-            <div className="jobs-grid">
-              {jobs.map((job) => (
-                <JobCard key={job.id} job={job} onAction={fetchJobs} />
-              ))}
+          <div className="jobs-grid">
+              {(() => {
+                // Group jobs by groupId
+                const groups = new Map<string, Job[]>();
+                const singles: Job[] = [];
+
+                jobs.forEach((job) => {
+                  if (job.groupId) {
+                    const g = groups.get(job.groupId) || [];
+                    g.push(job);
+                    groups.set(job.groupId, g);
+                  } else {
+                    singles.push(job);
+                  }
+                });
+
+                const elements: React.ReactNode[] = [];
+
+                // Render grouped jobs together
+                groups.forEach((groupJobs, groupId) => {
+                  elements.push(
+                    <div key={groupId} className="job-group">
+                      <div className="job-group-label">Split job · {groupJobs[0]?.name.replace(/_part\d+$/, "")}</div>
+                      {groupJobs.map((job) => (
+                        <JobCard key={job.id} job={job} onAction={fetchJobs} />
+                      ))}
+                      <MergedDownloadBar groupId={groupId} jobs={groupJobs} />
+                    </div>
+                  );
+                });
+
+                // Render single jobs
+                singles.forEach((job) => {
+                  elements.push(<JobCard key={job.id} job={job} onAction={fetchJobs} />);
+                });
+
+                return elements;
+              })()}
             </div>
           )}
         </main>
@@ -555,6 +673,27 @@ export default function Dashboard() {
         .error-msg { font-size: 13px; color: var(--invalid); background: var(--invalid-bg); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid ${`var(--invalid)`}30; }
         code { font-family: 'Geist Mono', monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
         .hidden { display: none; }
+        /* ── Split info ── */
+        .split-info { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
+        .split-icon { font-size: 28px; }
+        .split-title { font-size: 15px; color: var(--text-1); }
+        .split-desc { font-size: 13px; color: var(--text-3); line-height: 1.6; max-width: 340px; }
+        .split-preview { display: flex; align-items: center; gap: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 20px; }
+        .split-part { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .split-part-label { font-size: 11px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em; }
+        .split-part-count { font-size: 16px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+        .split-divider { font-size: 18px; color: var(--text-4); font-weight: 300; }
+        .split-hint { font-size: 12px; color: var(--text-4); }
+        /* ── Job group ── */
+        .job-group { display: flex; flex-direction: column; gap: 8px; }
+        .job-group-label { font-size: 11px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; padding: 0 4px; }
+        /* ── Merged bar ── */
+        .merged-bar { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+        .merged-label { display: flex; align-items: center; gap: 8px; }
+        .merged-icon { font-size: 14px; }
+        .merged-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+        .merged-hint { font-size: 12px; color: var(--text-4); }
+        .merged-downloads { display: flex; gap: 6px; flex-wrap: wrap; }
       `}</style>
     </>
   );

@@ -1,7 +1,16 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { recoverStuckJobs } from "@/lib/recover";
+
+let recovered = false;
 
 export async function GET() {
+  // Run once on first request after server starts
+  if (!recovered) {
+    recovered = true;
+    await recoverStuckJobs();
+  }
+
   const jobs = await prisma.job.findMany({
     orderBy: { createdAt: "desc" },
     select: {
@@ -16,6 +25,8 @@ export async function GET() {
       unknown: true,
       status: true,
       concurrency: true,
+      groupId: true,
+      partNumber: true,
       startedAt: true,
       finishedAt: true,
       createdAt: true,
