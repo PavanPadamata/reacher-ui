@@ -27,21 +27,14 @@ export async function GET(req: NextRequest, { params }: Params) {
       email: true,
       name: true,
       status: true,
-      isReachable: true,
-      isDisposable: true,
-      isRoleAccount: true,
-      isCatchAll: true,
-      mxAcceptsMail: true,
-      smtpDeliverable: true,
-      smtpDisabled: true,
     },
     orderBy: { email: "asc" },
   });
 
   // Build CSV
-  const header = "email,name,status,is_reachable,is_disposable,is_role_account,is_catch_all,mx_accepts_mail,smtp_deliverable,smtp_disabled\n";
+  const header = "email,name,status\n";
   const rows = results.map((r) =>
-    [r.email, r.name, r.status, r.isReachable, r.isDisposable, r.isRoleAccount, r.isCatchAll, r.mxAcceptsMail, r.smtpDeliverable, r.smtpDisabled].join(",")
+    [r.email, r.name, r.status].join(",")
   ).join("\n");
 
   const suffix = statusFilter && statusFilter !== "all" ? `_${statusFilter}` : "_all";
