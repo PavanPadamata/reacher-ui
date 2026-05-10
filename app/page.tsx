@@ -28,7 +28,9 @@ interface InputRow {
   [key: string]: string;
 }
 
-interface ResultRow extends InputRow {
+interface ResultRow {
+  email: string;
+  name: string;
   status: Status;
   is_reachable: string;
   is_disposable: boolean;
