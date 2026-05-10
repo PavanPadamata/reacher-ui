@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  reacher:
+    image: reacherhq/backend:latest
+    container_name: reacher-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend_config.toml:/app/backend_config.toml:ro
+    environment:
+      - RUST_LOG=reacher=info
+    restart: unless-stopped
+    networks:
+      - reacher-net
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reacher-ui
+    ports:
+      - "3000:3000"
+    environment:
+      - REACHER_BACKEND_URL=http://reacher:8080
+      - NEXT_PUBLIC_APP_URL=http://localhost:3000
+    depends_on:
+      - reacher
+    restart: unless-stopped
+    networks:
+      - reacher-net
+
+networks:
+  reacher-net:
+    driver: bridge
