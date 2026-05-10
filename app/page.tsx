@@ -22,12 +22,6 @@ import Papa from "papaparse";
 
 type Status = "safe" | "risky" | "invalid" | "unknown" | "pending" | "error";
 
-interface InputRow {
-  email: string;
-  name: string;
-  [key: string]: string;
-}
-
 interface ResultRow {
   email: string;
   name: string;
@@ -75,12 +69,18 @@ function statusLabel(status: Status) {
 }
 
 function downloadCSV(rows: ResultRow[], filename: string) {
-  const fields = ["email", "name", "status", "is_reachable", "is_disposable", "is_role_account", "is_catch_all", "mx_accepts_mail", "smtp_deliverable", "smtp_disabled"];
-  const csv = Papa.unparse(rows.map((r) => {
-    const obj: Record<string, unknown> = {};
-    fields.forEach((f) => { obj[f] = (r as Record<string, unknown>)[f] ?? ""; });
-    return obj;
-  }));
+  const csv = Papa.unparse(rows.map((r) => ({
+    email: r.email,
+    name: r.name,
+    status: r.status,
+    is_reachable: r.is_reachable,
+    is_disposable: r.is_disposable,
+    is_role_account: r.is_role_account,
+    is_catch_all: r.is_catch_all,
+    mx_accepts_mail: r.mx_accepts_mail,
+    smtp_deliverable: r.smtp_deliverable,
+    smtp_disabled: r.smtp_disabled,
+  })));
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
