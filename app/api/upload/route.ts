@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+// Increase body size limit to 200MB for large CSVs
+export const maxDuration = 300; // 5 min timeout
+export const dynamic = "force-dynamic";
+
+// Tell Next.js to allow large request bodies
+export const fetchCache = "force-no-store";
+
 const SPLIT_THRESHOLD = 500000;
+const BATCH_SIZE = 1000; // insert 1000 rows at a time
 
 async function createJob(
   name: string,
@@ -11,7 +19,8 @@ async function createJob(
   groupId?: string,
   partNumber?: number
 ) {
-  return prisma.job.create({
+  // Create job first
+  const job = await prisma.job.create({
     data: {
       name,
       fileName,
@@ -20,15 +29,23 @@ async function createJob(
       status: "PENDING",
       groupId: groupId || null,
       partNumber: partNumber || null,
-      results: {
-        create: rows.map((r) => ({
-          email: r.email,
-          name: r.name,
-          status: "pending",
-        })),
-      },
     },
   });
+
+  // Batch insert results in chunks of 1000
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    await prisma.result.createMany({
+      data: batch.map((r) => ({
+        jobId: job.id,
+        email: r.email,
+        name: r.name,
+        status: "pending",
+      })),
+    });
+  }
+
+  return job;
 }
 
 export async function POST(req: NextRequest) {
