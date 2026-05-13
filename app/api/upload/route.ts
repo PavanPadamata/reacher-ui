@@ -52,11 +52,9 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
-    const presetName = (formData.get("preset") as string) || "safe";
-    const presetMap: Record<string, number> = {
-      safe: 1, balanced: 2, fast: 3, maximum: 4,
-    };
-    const concurrency = presetMap[presetName] || 1;
+    // Accept raw concurrency number (1-50) from slider
+    const rawConcurrency = parseInt(formData.get("concurrency") as string);
+    const concurrency = isNaN(rawConcurrency) ? 8 : Math.max(1, Math.min(50, rawConcurrency));
     const forceSingle = formData.get("forceSingle") === "true";
 
     if (!file) return NextResponse.json({ error: "No file" }, { status: 400 });

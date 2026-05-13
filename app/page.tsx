@@ -93,9 +93,40 @@ function ThemeToggle() {
 
 // ── Upload Modal ──────────────────────────────────────────────────────────────
 
+// Avg seconds per email per concurrent slot by list type
+const AVG_SECS_PER_EMAIL: Record<string, number> = {
+  healthcare: 3.5,
+  corporate:  1.5,
+  mixed:      4.0,
+  consumer:   4.5,
+};
+
+function calcEstimates(listType: string, concurrency: number, totalEmails: number) {
+  const avgSecs = AVG_SECS_PER_EMAIL[listType] || 4.0;
+  const emailsPerHour = Math.round((concurrency / avgSecs) * 3600);
+  const emailsPerDay  = emailsPerHour * 24;
+  const jobSecs = totalEmails > 0 ? Math.round((totalEmails * avgSecs) / concurrency) : 0;
+  const riskLevel =
+    concurrency <= 10 ? { label: "Low",       color: "var(--safe)",    tip: "Safe for all providers" } :
+    concurrency <= 20 ? { label: "Medium",     color: "var(--risky)",   tip: "Monitor Gmail/Yahoo results" } :
+    concurrency <= 35 ? { label: "High",       color: "#f97316",        tip: "Use proxies for consumer lists" } :
+                        { label: "Very High",  color: "var(--invalid)", tip: "Requires SMTP proxies" };
+  return { emailsPerHour, emailsPerDay, jobSecs, riskLevel };
+}
+
+function fmtDuration(secs: number): string {
+  if (secs <= 0) return "—";
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [listType, setListType] = useState<"healthcare" | "corporate" | "mixed" | "consumer">("mixed");
+  const [concurrency, setConcurrency] = useState(8);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -103,13 +134,15 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
   const inputRef = useRef<HTMLInputElement>(null);
 
   const LIST_TYPES = [
-    { key: "healthcare", icon: "🏥", label: "Healthcare / Medical", desc: "Hospitals, clinics, medical practices",       preset: "safe",     risk: "Most accurate for M365-heavy lists" },
-    { key: "corporate",  icon: "🏢", label: "Corporate / B2B",      desc: "Businesses, agencies, SaaS companies",        preset: "balanced", risk: "Good speed for business domains" },
-    { key: "mixed",      icon: "📧", label: "Mixed List",            desc: "Gmail, Yahoo, corporate and other emails",    preset: "safe",     risk: "Protects IP on consumer providers" },
-    { key: "consumer",   icon: "⚡", label: "Consumer Email",        desc: "Mostly Gmail, Yahoo, Outlook accounts",       preset: "safe",     risk: "Gmail and Yahoo rate-limit fast" },
+    { key: "healthcare", icon: "🏥", label: "Healthcare / Medical", desc: "Hospitals, clinics, medical practices" },
+    { key: "corporate",  icon: "🏢", label: "Corporate / B2B",      desc: "Businesses, agencies, SaaS companies" },
+    { key: "mixed",      icon: "📧", label: "Mixed List",            desc: "Gmail, Yahoo, corporate and other emails" },
+    { key: "consumer",   icon: "⚡", label: "Consumer Email",        desc: "Mostly Gmail, Yahoo, Outlook accounts" },
   ] as const;
 
-  const selected = LIST_TYPES.find((t) => t.key === listType) || LIST_TYPES[2];
+  // Live estimates
+  const emailCount = file ? Math.round(file.size / 40) : 0; // rough estimate before parsing
+  const est = calcEstimates(listType, concurrency, emailCount);
 
   const handleFile = (f: File) => {
     if (!f.name.endsWith(".csv")) { setError("Only CSV files are supported"); return; }
@@ -125,7 +158,7 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("preset", selected.preset);
+      fd.append("concurrency", String(concurrency));
       if (forceSingle) fd.append("forceSingle", "true");
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       const data = await res.json();
@@ -184,7 +217,7 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2 className="modal-title">New Verification Job</h2>
           <button className="icon-btn" onClick={onClose}><X size={16} /></button>
@@ -218,24 +251,83 @@ function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded:
 
         {/* List type picker */}
         <div className="field">
-          <label className="field-label">What type of list is this?</label>
-          <div className="listtype-grid">
+          <label className="field-label">List Type</label>
+          <div className="listtype-row">
             {LIST_TYPES.map((t) => (
               <button
                 key={t.key}
                 type="button"
                 onClick={() => setListType(t.key)}
-                className={`listtype-btn${listType === t.key ? " active" : ""}`}
+                className={`listtype-chip${listType === t.key ? " active" : ""}`}
               >
-                <span className="listtype-icon">{t.icon}</span>
-                <div className="listtype-text">
-                  <span className="listtype-label">{t.label}</span>
-                  <span className="listtype-desc">{t.desc}</span>
-                </div>
+                <span>{t.icon}</span>
+                <span>{t.label}</span>
               </button>
             ))}
           </div>
-          <p className="listtype-hint">✓ {selected.risk}</p>
+        </div>
+
+        {/* Concurrency slider */}
+        <div className="field">
+          <div className="field-header">
+            <label className="field-label">Concurrent Verifications</label>
+            <span className="concurrency-val">{concurrency}</span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={50}
+            step={1}
+            value={concurrency}
+            onChange={(e) => setConcurrency(Number(e.target.value))}
+            className="slider"
+          />
+          <div className="slider-labels">
+            <span>1 — Conservative</span>
+            <span>25 — Balanced</span>
+            <span>50 — Maximum</span>
+          </div>
+        </div>
+
+        {/* Live estimates card */}
+        <div className="estimates-card">
+          <div className="estimates-row">
+            <div className="estimate-item">
+              <span className="estimate-icon">⚡</span>
+              <div>
+                <p className="estimate-val">{fmt(est.emailsPerHour)}</p>
+                <p className="estimate-label">emails / hour</p>
+              </div>
+            </div>
+            <div className="estimate-divider" />
+            <div className="estimate-item">
+              <span className="estimate-icon">📅</span>
+              <div>
+                <p className="estimate-val">{fmt(est.emailsPerDay)}</p>
+                <p className="estimate-label">emails / day</p>
+              </div>
+            </div>
+            <div className="estimate-divider" />
+            <div className="estimate-item">
+              <span className="estimate-icon">⏱</span>
+              <div>
+                <p className="estimate-val">{file ? fmtDuration(est.jobSecs) : "—"}</p>
+                <p className="estimate-label">est. job time</p>
+              </div>
+            </div>
+            <div className="estimate-divider" />
+            <div className="estimate-item">
+              <span className="estimate-icon">🛡</span>
+              <div>
+                <p className="estimate-val" style={{ color: est.riskLevel.color }}>{est.riskLevel.label}</p>
+                <p className="estimate-label">IP risk</p>
+              </div>
+            </div>
+          </div>
+          <p className="estimate-tip" style={{ color: est.riskLevel.color }}>
+            {est.riskLevel.tip}
+            {concurrency > 20 && " — consider using SMTP proxies for better accuracy"}
+          </p>
         </div>
 
         {error && <p className="error-msg">{error}</p>}
@@ -288,7 +380,7 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
             {sc.label}
           </span>
         </div>
-        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · { {1:"🏥 Healthcare", 2:"🏢 Corporate", 3:"📧 Mixed", 4:"⚡ Consumer"}[job.concurrency] || "🐢 Safe" }</p>
+        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · {job.concurrency} concurrent</p>
       </div>
 
       {/* Progress bar */}
@@ -679,16 +771,24 @@ export default function Dashboard() {
         .error-msg { font-size: 13px; color: var(--invalid); background: var(--invalid-bg); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid ${`var(--invalid)`}30; }
         code { font-family: 'Geist Mono', monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
         .hidden { display: none; }
-        /* ── List type picker ── */
-        .listtype-grid { display: flex; flex-direction: column; gap: 6px; }
-        .listtype-btn { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 9px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; text-align: left; transition: all 0.12s; font-family: inherit; width: 100%; }
-        .listtype-btn:hover { border-color: var(--border-2); background: var(--surface-2); }
-        .listtype-btn.active { border-color: var(--accent); background: var(--accent-bg); }
-        .listtype-icon { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; }
-        .listtype-text { display: flex; flex-direction: column; gap: 1px; }
-        .listtype-label { font-size: 13px; font-weight: 600; color: var(--text-1); }
-        .listtype-desc { font-size: 12px; color: var(--text-3); }
-        .listtype-hint { font-size: 12px; color: var(--safe); margin-top: 6px; font-weight: 500; }
+        /* ── Modal wide ── */
+        .modal-wide { max-width: 560px !important; }
+        /* ── List type chips ── */
+        .listtype-row { display: flex; gap: 6px; flex-wrap: wrap; }
+        .listtype-chip { display: flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--text-2); transition: all 0.12s; white-space: nowrap; }
+        .listtype-chip:hover { border-color: var(--border-2); background: var(--surface-2); color: var(--text-1); }
+        .listtype-chip.active { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
+        /* ── Concurrency slider ── */
+        .concurrency-val { font-size: 20px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; line-height: 1; }
+        /* ── Estimates card ── */
+        .estimates-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+        .estimates-row { display: flex; align-items: center; gap: 0; }
+        .estimate-item { display: flex; align-items: center; gap: 10px; flex: 1; }
+        .estimate-icon { font-size: 18px; flex-shrink: 0; }
+        .estimate-val { font-size: 15px; font-weight: 700; color: var(--text-1); font-variant-numeric: tabular-nums; line-height: 1.2; }
+        .estimate-label { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+        .estimate-divider { width: 1px; height: 32px; background: var(--border); margin: 0 12px; flex-shrink: 0; }
+        .estimate-tip { font-size: 12px; color: var(--text-3); }
         /* ── Split info ── */
         .split-info { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
         .split-icon { font-size: 28px; }

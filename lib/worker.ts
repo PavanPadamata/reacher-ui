@@ -3,15 +3,18 @@ import { resolveMx } from "node:dns/promises";
 
 const REACHER_URL = process.env.REACHER_BACKEND_URL || "http://localhost:8080";
 
-// ── Concurrency presets ────────────────────────────────────────────────────
-export const CONCURRENCY_PRESETS = {
-  safe:     { total: 8,  perDomain: 1, cooldownMs: 1000 },
-  balanced: { total: 15, perDomain: 2, cooldownMs: 500  },
-  fast:     { total: 30, perDomain: 3, cooldownMs: 200  },
-  maximum:  { total: 50, perDomain: 3, cooldownMs: 0    },
-} as const;
-
-export type ConcurrencyPreset = keyof typeof CONCURRENCY_PRESETS;
+// ── Concurrency config derived from raw concurrency value ─────────────────
+// perDomain = max(1, floor(total / 5)) — never hammer one server
+// cooldownMs scales down as concurrency goes up
+export function getConcurrencyConfig(total: number) {
+  const clamped = Math.max(1, Math.min(50, total));
+  const perDomain = Math.max(1, Math.floor(clamped / 5));
+  const cooldownMs =
+    clamped <= 10 ? 1000 :
+    clamped <= 20 ? 500 :
+    clamped <= 35 ? 200 : 0;
+  return { total: clamped, perDomain, cooldownMs };
+}
 
 // ── Enterprise MX patterns ─────────────────────────────────────────────────
 const UNVERIFIABLE_MX_PATTERNS = [
@@ -28,7 +31,7 @@ const UNVERIFIABLE_MX_PATTERNS = [
   "trendmicro.com",
 ];
 
-// ── DNS caches ─────────────────────────────────────────────────────────────
+// ── DNS caches (module-level, shared across jobs) ──────────────────────────
 const mxCache = new Map<string, boolean>();
 const domainMxCache = new Map<string, string>();
 
@@ -63,37 +66,32 @@ async function isUnverifiableDomain(email: string): Promise<boolean> {
 }
 
 // ── Job control ────────────────────────────────────────────────────────────
-// Each job has a control state: running | paused | stopped
 type JobControl = "running" | "paused" | "stopped";
 const jobControl = new Map<string, JobControl>();
 
 export function signalJob(jobId: string, signal: "pause" | "stop" | null) {
   if (signal === "pause")  jobControl.set(jobId, "paused");
-  else if (signal === "stop")   jobControl.set(jobId, "stopped");
-  else                          jobControl.set(jobId, "running");
+  else if (signal === "stop") jobControl.set(jobId, "stopped");
+  else                        jobControl.set(jobId, "running");
 }
 
 export function getJobSignal(jobId: string) {
   return jobControl.get(jobId) ?? null;
 }
 
-// Wait until job is unpaused or stopped — called before processing each email
 async function waitIfPaused(jobId: string): Promise<boolean> {
   const state = jobControl.get(jobId);
-  if (state === "stopped") return false; // signal caller to stop
-  if (state !== "paused") return true;  // running, proceed
+  if (state === "stopped") return false;
+  if (state !== "paused") return true;
 
-  // Update DB status to PAUSED
   await prisma.job.update({ where: { id: jobId }, data: { status: "PAUSED" } });
 
-  // Poll every 500ms until resumed or stopped
   while (jobControl.get(jobId) === "paused") {
     await new Promise((r) => setTimeout(r, 500));
   }
 
   if (jobControl.get(jobId) === "stopped") return false;
 
-  // Resumed — update DB back to RUNNING
   await prisma.job.update({ where: { id: jobId }, data: { status: "RUNNING" } });
   return true;
 }
@@ -104,7 +102,7 @@ async function verifyEmail(email: string): Promise<Record<string, unknown>> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ to_email: email.trim().toLowerCase() }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(30000), // 30s timeout — faster failure
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -143,12 +141,9 @@ export async function runJob(jobId: string) {
     return;
   }
 
-  const presetMap: Record<number, ConcurrencyPreset> = {
-    1: "safe", 2: "balanced", 3: "fast", 4: "maximum",
-  };
-  const config = CONCURRENCY_PRESETS[presetMap[job.concurrency] || "safe"];
+  // Raw concurrency stored directly — derive config from it
+  const config = getConcurrencyConfig(job.concurrency);
 
-  // ── Semaphore for total + per-domain concurrency ───────────────────────
   let totalActive = 0;
   const mxActive = new Map<string, number>();
   const mxLastProbe = new Map<string, number>();
@@ -157,7 +152,6 @@ export async function runJob(jobId: string) {
   const incMxActive  = (mx: string) => mxActive.set(mx, getMxActive(mx) + 1);
   const decMxActive  = (mx: string) => mxActive.set(mx, Math.max(0, getMxActive(mx) - 1));
 
-  // Process one email — returns false if job should stop
   async function processOne(item: { id: string; email: string; name: string }, mx: string): Promise<void> {
     try {
       const unverifiable = await isUnverifiableDomain(item.email);
@@ -182,13 +176,13 @@ export async function runJob(jobId: string) {
           where: { id: item.id },
           data: {
             status,
-            isReachable:     (data.is_reachable as string)   || "",
-            isDisposable:    (misc.is_disposable as boolean)  || false,
-            isRoleAccount:   (misc.is_role_account as boolean)|| false,
-            isCatchAll:      (smtp.is_catch_all as boolean)   || false,
-            mxAcceptsMail:   (mx2.accepts_mail as boolean)    || false,
-            smtpDeliverable: (smtp.is_deliverable as boolean) || false,
-            smtpDisabled:    (smtp.is_disabled as boolean)    || false,
+            isReachable:     (data.is_reachable as string)    || "",
+            isDisposable:    (misc.is_disposable as boolean)   || false,
+            isRoleAccount:   (misc.is_role_account as boolean) || false,
+            isCatchAll:      (smtp.is_catch_all as boolean)    || false,
+            mxAcceptsMail:   (mx2.accepts_mail as boolean)     || false,
+            smtpDeliverable: (smtp.is_deliverable as boolean)  || false,
+            smtpDisabled:    (smtp.is_disabled as boolean)     || false,
           },
         });
 
@@ -220,76 +214,70 @@ export async function runJob(jobId: string) {
   }
 
   // ── Main scheduling loop ───────────────────────────────────────────────
-  let idx = 0;
   const queue = [...allResults];
+  let idx = 0;
 
   while (idx < queue.length || totalActive > 0) {
-    // Check stop signal
+    // Check stop
     if (jobControl.get(jobId) === "stopped") {
-      // Wait for active requests to finish
       while (totalActive > 0) await new Promise((r) => setTimeout(r, 200));
       await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
       jobControl.delete(jobId);
-      mxCache.clear(); domainMxCache.clear();
       return;
     }
 
-    // Check pause signal — wait until resumed
+    // Check pause
     if (jobControl.get(jobId) === "paused") {
       const ok = await waitIfPaused(jobId);
       if (!ok) {
         while (totalActive > 0) await new Promise((r) => setTimeout(r, 200));
         await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
         jobControl.delete(jobId);
-        mxCache.clear(); domainMxCache.clear();
         return;
       }
       continue;
     }
 
-    // Try to schedule next eligible email
+    // Try to schedule next eligible item
     if (idx < queue.length && totalActive < config.total) {
       const item = queue[idx];
       const domain = item.email.split("@")[1]?.toLowerCase() || "";
       const mx = await getDomainMx(domain);
 
-      // Check per-domain limit
+      // Per-domain limit check
       if (getMxActive(mx) >= config.perDomain) {
-        // Can't send to this MX right now — try next item
-        // Simple round: move to end and increment
-        queue.push(queue.splice(idx, 1)[0]);
-        // Avoid infinite spin if all items are blocked
-        await new Promise((r) => setTimeout(r, 50));
+        // Rotate to next item
+        if (idx < queue.length - 1) {
+          idx++;
+          continue;
+        }
+        await new Promise((r) => setTimeout(r, 100));
         continue;
       }
 
-      // Check cooldown
+      // Cooldown check
       const lastProbe = mxLastProbe.get(mx) || 0;
       const timeSince = Date.now() - lastProbe;
       if (config.cooldownMs > 0 && timeSince < config.cooldownMs) {
-        await new Promise((r) => setTimeout(r, config.cooldownMs - timeSince));
+        await new Promise((r) => setTimeout(r, Math.min(config.cooldownMs - timeSince, 100)));
         continue;
       }
 
-      // Schedule this item
-      idx++;
+      // Schedule
+      queue.splice(idx, 1); // remove from queue (don't increment idx)
       totalActive++;
       incMxActive(mx);
       mxLastProbe.set(mx, Date.now());
-      processOne(item, mx); // fire and forget — tracking via totalActive
+      processOne(item, mx); // fire and forget
     } else {
-      // Either at concurrency limit or waiting for active to finish
       await new Promise((r) => setTimeout(r, 100));
     }
   }
 
-  // All done
   await prisma.job.update({
     where: { id: jobId },
     data: { status: "COMPLETED", finishedAt: new Date() },
   });
 
   jobControl.delete(jobId);
-  mxCache.clear();
-  domainMxCache.clear();
 }
