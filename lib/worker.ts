@@ -32,11 +32,25 @@ const UNVERIFIABLE_MX_PATTERNS = [
 ];
 
 // ── DNS caches (module-level, shared across jobs) ──────────────────────────
+// Capped at 50k entries to prevent unbounded memory growth
+const MAX_CACHE_SIZE = 50000;
 const mxCache = new Map<string, boolean>();
 const domainMxCache = new Map<string, string>();
 
+function pruneCacheIfNeeded() {
+  if (mxCache.size > MAX_CACHE_SIZE) {
+    const toDelete = [...mxCache.keys()].slice(0, 10000);
+    toDelete.forEach((k) => mxCache.delete(k));
+  }
+  if (domainMxCache.size > MAX_CACHE_SIZE) {
+    const toDelete = [...domainMxCache.keys()].slice(0, 10000);
+    toDelete.forEach((k) => domainMxCache.delete(k));
+  }
+}
+
 async function getDomainMx(domain: string): Promise<string> {
   if (domainMxCache.has(domain)) return domainMxCache.get(domain)!;
+  pruneCacheIfNeeded();
   try {
     const records = await resolveMx(domain);
     const mx = records.sort((a, b) => a.priority - b.priority)[0]?.exchange || domain;
@@ -52,6 +66,7 @@ async function isUnverifiableDomain(email: string): Promise<boolean> {
   const domain = email.split("@")[1]?.toLowerCase();
   if (!domain) return false;
   if (mxCache.has(domain)) return mxCache.get(domain)!;
+  pruneCacheIfNeeded();
   try {
     const records = await resolveMx(domain);
     const isEnterprise = records.some((r) =>
@@ -96,13 +111,64 @@ async function waitIfPaused(jobId: string): Promise<boolean> {
   return true;
 }
 
+// ── Proxy rotation ─────────────────────────────────────────────────────────
+// Configure your SOCKS5 proxies here — fill in credentials
+// Set to empty array to disable proxies
+const PROXIES = [
+  {
+    host: process.env.PROXY1_HOST || "",
+    port: parseInt(process.env.PROXY1_PORT || "0"),
+    username: process.env.PROXY1_USER || "",
+    password: process.env.PROXY1_PASS || "",
+  },
+  {
+    host: process.env.PROXY2_HOST || "",
+    port: parseInt(process.env.PROXY2_PORT || "0"),
+    username: process.env.PROXY2_USER || "",
+    password: process.env.PROXY2_PASS || "",
+  },
+  {
+    host: process.env.PROXY3_HOST || "",
+    port: parseInt(process.env.PROXY3_PORT || "0"),
+    username: process.env.PROXY3_USER || "",
+    password: process.env.PROXY3_PASS || "",
+  },
+].filter((p) => p.host && p.port > 0); // only use proxies that are configured
+
+let proxyIndex = 0;
+
+function getNextProxy() {
+  if (PROXIES.length === 0) return null;
+  const proxy = PROXIES[proxyIndex % PROXIES.length];
+  proxyIndex++;
+  return proxy;
+}
+
 // ── Reacher call ───────────────────────────────────────────────────────────
 async function verifyEmail(email: string): Promise<Record<string, unknown>> {
+  const proxy = getNextProxy();
+
+  const body: Record<string, unknown> = {
+    to_email: email.trim().toLowerCase(),
+    from_email: process.env.REACHER_FROM_EMAIL || "verify@nyelizabeth.net",
+    hello_name: process.env.REACHER_HELLO_NAME || "verify.nyelizabeth.net",
+  };
+
+  // Add proxy if configured
+  if (proxy) {
+    body.proxy = {
+      host: proxy.host,
+      port: proxy.port,
+      ...(proxy.username && { username: proxy.username }),
+      ...(proxy.password && { password: proxy.password }),
+    };
+  }
+
   const res = await fetch(`${REACHER_URL}/v0/check_email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to_email: email.trim().toLowerCase() }),
-    signal: AbortSignal.timeout(30000), // 30s timeout — faster failure
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();

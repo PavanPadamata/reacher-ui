@@ -1,59 +1,7 @@
 # backend_config.toml
 # Reacher Backend Configuration
-# Docs: https://docs.reacher.email/self-hosting/reacher-configuration-v0.10
 
-[backend_config]
-# From email used in SMTP MAIL FROM command.
-# Use a real domain you own for better deliverability.
-from_email = "verify@example.com"
-
-# The name used in the SMTP EHLO command.
-hello_name = "example.com"
-
-# Number of retries for SMTP connections (helps avoid greylisting)
-smtp_timeout = 45
-
-# Throttle: max concurrent verifications
-[backend_config.throttle]
-# Max requests per second (be conservative to avoid IP bans)
-max_requests_per_second = 5
-max_requests_per_minute = 60
-max_requests_per_hour = 500
-max_requests_per_day = 5000
-
-# ─── Gmail ────────────────────────────────────────────────────────────────────
-# Gmail blocks standard SMTP verification from most IPs.
-# Using "smtp" method — works on clean VPS IPs with port 25 open.
-# If results return "unknown", you likely need a proxy with a clean IP.
-[overrides.gmail]
-type = "smtp"
-hello_name = "example.com"
-from_email = "verify@example.com"
-# Uncomment and set proxy name if your IP is blocked by Gmail:
-# proxy = "proxy1"
-
-# ─── Yahoo ────────────────────────────────────────────────────────────────────
-# Yahoo supports SMTP verification. Works well from clean IPs.
-[overrides.yahoo]
-type = "smtp"
-hello_name = "example.com"
-from_email = "verify@example.com"
-
-# ─── Hotmail B2C (outlook.com, hotmail.com, live.com) ─────────────────────────
-[overrides.hotmailb2c]
-type = "smtp"
-hello_name = "example.com"
-from_email = "verify@example.com"
-
-# ─── Hotmail B2B (corporate Microsoft domains) ────────────────────────────────
-[overrides.hotmailb2b]
-type = "smtp"
-hello_name = "example.com"
-from_email = "verify@example.com"
-
-# ─── Optional: SOCKS5 Proxy ───────────────────────────────────────────────────
-# Recommended if you're getting "unknown" results for Gmail/Yahoo.
-# Get clean SMTP proxies from proxy25.com or similar providers.
-#
-# [overrides.proxies]
-# proxy1 = { host = "my.proxy1.com", port = 1080, username = "user", password = "pass" }
+hello_name = "verify.nyelizabeth.net"
+from_email = "verify@nyelizabeth.net"
+smtp_timeout = 30
+webdriver_addr = "http://localhost:9515"

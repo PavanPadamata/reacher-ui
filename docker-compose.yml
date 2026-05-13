@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -24,7 +22,7 @@ services:
     container_name: reacher-backend
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./backend_config.toml:/app/backend_config.toml:ro
     environment:
@@ -45,6 +43,21 @@ services:
       - DATABASE_URL=postgresql://reacher:reacher_secret@postgres:5432/reacher
       - NEXT_PUBLIC_APP_URL=http://localhost:3000
       - AUTH_SECRET=change-this-to-a-random-secret-string-min-32-chars
+      - REACHER_FROM_EMAIL=verify@nyelizabeth.net
+      - REACHER_HELLO_NAME=verify.nyelizabeth.net
+      # ── SOCKS5 Proxies (fill in your credentials) ──
+      - PROXY1_HOST=48.00.0.00.1
+      - PROXY1_PORT=46170
+      - PROXY1_USER=YOUR_USERNAME_1
+      - PROXY1_PASS=YOUR_PASSWORD_1
+      - PROXY2_HOST=48.00.0.00.1
+      - PROXY2_PORT=44797
+      - PROXY2_USER=YOUR_USERNAME_2
+      - PROXY2_PASS=YOUR_PASSWORD_2
+      - PROXY3_HOST=48.00.0.00.1
+      - PROXY3_PORT=YOUR_PORT_3
+      - PROXY3_USER=YOUR_USERNAME_3
+      - PROXY3_PASS=YOUR_PASSWORD_3
     depends_on:
       postgres:
         condition: service_healthy
