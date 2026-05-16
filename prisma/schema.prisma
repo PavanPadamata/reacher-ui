@@ -36,7 +36,7 @@ model Result {
   jobId          String
   email          String
   name           String  @default("")
-  status         String  // safe | risky | invalid | unknown | error
+  status         String  // safe | risky | invalid | unknown | unverifiable | error
   isReachable    String  @default("")
   isDisposable   Boolean @default(false)
   isRoleAccount  Boolean @default(false)

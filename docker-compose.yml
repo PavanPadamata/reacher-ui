@@ -17,19 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  reacher:
-    image: reacherhq/backend:latest
-    container_name: reacher-backend
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8080:8080"
-    volumes:
-      - ./backend_config.toml:/app/backend_config.toml:ro
-    environment:
-      - RUST_LOG=reacher=info
-    networks:
-      - reacher-net
-
   ui:
     build:
       context: .
@@ -39,30 +26,19 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - REACHER_BACKEND_URL=http://reacher:8080
       - DATABASE_URL=postgresql://reacher:reacher_secret@postgres:5432/reacher
       - NEXT_PUBLIC_APP_URL=http://localhost:3000
       - AUTH_SECRET=change-this-to-a-random-secret-string-min-32-chars
       - REACHER_FROM_EMAIL=verify@nyelizabeth.net
       - REACHER_HELLO_NAME=verify.nyelizabeth.net
-      # ── SOCKS5 Proxies (fill in your credentials) ──
-      - PROXY1_HOST=48.00.0.00.1
-      - PROXY1_PORT=46170
-      - PROXY1_USER=YOUR_USERNAME_1
-      - PROXY1_PASS=YOUR_PASSWORD_1
-      - PROXY2_HOST=48.00.0.00.1
-      - PROXY2_PORT=44797
-      - PROXY2_USER=YOUR_USERNAME_2
-      - PROXY2_PASS=YOUR_PASSWORD_2
-      - PROXY3_HOST=48.00.0.00.1
-      - PROXY3_PORT=YOUR_PORT_3
-      - PROXY3_USER=YOUR_USERNAME_3
-      - PROXY3_PASS=YOUR_PASSWORD_3
+      # ── Reacher backends (comma-separated, add as many as you have) ──
+      # Format: http://VPS1_IP:8080,http://VPS2_IP:8080,http://VPS3_IP:8080
+      - REACHER_BACKEND_URLS=http://VPS1_IP:8080,http://VPS2_IP:8080
+      # ── Daily limit per backend (emails/day per VPS) ──
+      - REACHER_DAILY_LIMIT_PER_BACKEND=50000
     depends_on:
       postgres:
         condition: service_healthy
-      reacher:
-        condition: service_started
     networks:
       - reacher-net
 

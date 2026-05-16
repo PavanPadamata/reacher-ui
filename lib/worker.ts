@@ -1,18 +1,23 @@
 import { prisma } from "./prisma";
 import { resolveMx } from "node:dns/promises";
+import {
+  getNextBackend,
+  markBackendFailed,
+  incrementBackendCount,
+  startHealthChecks,
+} from "./backends";
 
-const REACHER_URL = process.env.REACHER_BACKEND_URL || "http://localhost:8080";
+// Start health checks when worker module loads
+startHealthChecks();
 
-// ── Concurrency config derived from raw concurrency value ─────────────────
-// perDomain = max(1, floor(total / 5)) — never hammer one server
-// cooldownMs scales down as concurrency goes up
+// ── Concurrency config ─────────────────────────────────────────────────────
 export function getConcurrencyConfig(total: number) {
   const clamped = Math.max(1, Math.min(50, total));
   const perDomain = Math.max(1, Math.floor(clamped / 5));
   const cooldownMs =
     clamped <= 10 ? 1000 :
-    clamped <= 20 ? 500 :
-    clamped <= 35 ? 200 : 0;
+    clamped <= 20 ? 500  :
+    clamped <= 35 ? 200  : 0;
   return { total: clamped, perDomain, cooldownMs };
 }
 
@@ -31,8 +36,7 @@ const UNVERIFIABLE_MX_PATTERNS = [
   "trendmicro.com",
 ];
 
-// ── DNS caches (module-level, shared across jobs) ──────────────────────────
-// Capped at 50k entries to prevent unbounded memory growth
+// ── DNS caches ─────────────────────────────────────────────────────────────
 const MAX_CACHE_SIZE = 50000;
 const mxCache = new Map<string, boolean>();
 const domainMxCache = new Map<string, string>();
@@ -85,7 +89,7 @@ type JobControl = "running" | "paused" | "stopped";
 const jobControl = new Map<string, JobControl>();
 
 export function signalJob(jobId: string, signal: "pause" | "stop" | null) {
-  if (signal === "pause")  jobControl.set(jobId, "paused");
+  if (signal === "pause")     jobControl.set(jobId, "paused");
   else if (signal === "stop") jobControl.set(jobId, "stopped");
   else                        jobControl.set(jobId, "running");
 }
@@ -111,42 +115,13 @@ async function waitIfPaused(jobId: string): Promise<boolean> {
   return true;
 }
 
-// ── Proxy rotation ─────────────────────────────────────────────────────────
-// Configure your SOCKS5 proxies here — fill in credentials
-// Set to empty array to disable proxies
-const PROXIES = [
-  {
-    host: process.env.PROXY1_HOST || "",
-    port: parseInt(process.env.PROXY1_PORT || "0"),
-    username: process.env.PROXY1_USER || "",
-    password: process.env.PROXY1_PASS || "",
-  },
-  {
-    host: process.env.PROXY2_HOST || "",
-    port: parseInt(process.env.PROXY2_PORT || "0"),
-    username: process.env.PROXY2_USER || "",
-    password: process.env.PROXY2_PASS || "",
-  },
-  {
-    host: process.env.PROXY3_HOST || "",
-    port: parseInt(process.env.PROXY3_PORT || "0"),
-    username: process.env.PROXY3_USER || "",
-    password: process.env.PROXY3_PASS || "",
-  },
-].filter((p) => p.host && p.port > 0); // only use proxies that are configured
-
-let proxyIndex = 0;
-
-function getNextProxy() {
-  if (PROXIES.length === 0) return null;
-  const proxy = PROXIES[proxyIndex % PROXIES.length];
-  proxyIndex++;
-  return proxy;
-}
-
-// ── Reacher call ───────────────────────────────────────────────────────────
+// ── Reacher call with multi-backend support ────────────────────────────────
 async function verifyEmail(email: string): Promise<Record<string, unknown>> {
-  const proxy = getNextProxy();
+  const backend = getNextBackend();
+
+  if (!backend) {
+    throw new Error("No healthy backends available — all backends offline or daily limit reached");
+  }
 
   const body: Record<string, unknown> = {
     to_email: email.trim().toLowerCase(),
@@ -154,24 +129,23 @@ async function verifyEmail(email: string): Promise<Record<string, unknown>> {
     hello_name: process.env.REACHER_HELLO_NAME || "verify.nyelizabeth.net",
   };
 
-  // Add proxy if configured
-  if (proxy) {
-    body.proxy = {
-      host: proxy.host,
-      port: proxy.port,
-      ...(proxy.username && { username: proxy.username }),
-      ...(proxy.password && { password: proxy.password }),
-    };
-  }
+  try {
+    const res = await fetch(`${backend.url}/v0/check_email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
 
-  const res = await fetch(`${REACHER_URL}/v0/check_email`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    incrementBackendCount(backend.url);
+    return res.json();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "error";
+    markBackendFailed(backend.url, msg);
+    throw err;
+  }
 }
 
 function classifyResult(data: Record<string, unknown>): string {
@@ -207,7 +181,6 @@ export async function runJob(jobId: string) {
     return;
   }
 
-  // Raw concurrency stored directly — derive config from it
   const config = getConcurrencyConfig(job.concurrency);
 
   let totalActive = 0;
@@ -242,13 +215,13 @@ export async function runJob(jobId: string) {
           where: { id: item.id },
           data: {
             status,
-            isReachable:     (data.is_reachable as string)    || "",
-            isDisposable:    (misc.is_disposable as boolean)   || false,
-            isRoleAccount:   (misc.is_role_account as boolean) || false,
-            isCatchAll:      (smtp.is_catch_all as boolean)    || false,
-            mxAcceptsMail:   (mx2.accepts_mail as boolean)     || false,
-            smtpDeliverable: (smtp.is_deliverable as boolean)  || false,
-            smtpDisabled:    (smtp.is_disabled as boolean)     || false,
+            isReachable:     (data.is_reachable as string)     || "",
+            isDisposable:    (misc.is_disposable as boolean)    || false,
+            isRoleAccount:   (misc.is_role_account as boolean)  || false,
+            isCatchAll:      (smtp.is_catch_all as boolean)     || false,
+            mxAcceptsMail:   (mx2.accepts_mail as boolean)      || false,
+            smtpDeliverable: (smtp.is_deliverable as boolean)   || false,
+            smtpDisabled:    (smtp.is_disabled as boolean)      || false,
           },
         });
 
@@ -284,7 +257,6 @@ export async function runJob(jobId: string) {
   let idx = 0;
 
   while (idx < queue.length || totalActive > 0) {
-    // Check stop
     if (jobControl.get(jobId) === "stopped") {
       while (totalActive > 0) await new Promise((r) => setTimeout(r, 200));
       await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
@@ -292,7 +264,6 @@ export async function runJob(jobId: string) {
       return;
     }
 
-    // Check pause
     if (jobControl.get(jobId) === "paused") {
       const ok = await waitIfPaused(jobId);
       if (!ok) {
@@ -304,24 +275,17 @@ export async function runJob(jobId: string) {
       continue;
     }
 
-    // Try to schedule next eligible item
     if (idx < queue.length && totalActive < config.total) {
       const item = queue[idx];
       const domain = item.email.split("@")[1]?.toLowerCase() || "";
       const mx = await getDomainMx(domain);
 
-      // Per-domain limit check
       if (getMxActive(mx) >= config.perDomain) {
-        // Rotate to next item
-        if (idx < queue.length - 1) {
-          idx++;
-          continue;
-        }
+        if (idx < queue.length - 1) { idx++; continue; }
         await new Promise((r) => setTimeout(r, 100));
         continue;
       }
 
-      // Cooldown check
       const lastProbe = mxLastProbe.get(mx) || 0;
       const timeSince = Date.now() - lastProbe;
       if (config.cooldownMs > 0 && timeSince < config.cooldownMs) {
@@ -329,12 +293,11 @@ export async function runJob(jobId: string) {
         continue;
       }
 
-      // Schedule
-      queue.splice(idx, 1); // remove from queue (don't increment idx)
+      queue.splice(idx, 1);
       totalActive++;
       incMxActive(mx);
       mxLastProbe.set(mx, Date.now());
-      processOne(item, mx); // fire and forget
+      processOne(item, mx);
     } else {
       await new Promise((r) => setTimeout(r, 100));
     }

@@ -9,6 +9,17 @@ import {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+interface Backend {
+  url: string;
+  healthy: boolean;
+  lastChecked: number;
+  lastError: string | null;
+  responseTime: number | null;
+  dailyCount: number;
+  dailyLimit: number;
+  lastReset: string;
+}
+
 type JobStatus = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "STOPPED" | "FAILED";
 
 interface Job {
@@ -469,6 +480,79 @@ function MergedDownloadBar({ groupId, jobs }: { groupId: string; jobs: Job[] }) 
   );
 }
 
+// ── Backends Panel ────────────────────────────────────────────────────────────
+
+function BackendsPanel() {
+  const [backends, setBackends] = useState<Backend[]>([]);
+  const [checking, setChecking] = useState(false);
+
+  const fetchBackends = useCallback(async () => {
+    try {
+      const res = await fetch("/api/backends");
+      const data = await res.json();
+      if (Array.isArray(data)) setBackends(data);
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    fetchBackends();
+    const interval = setInterval(fetchBackends, 30000);
+    return () => clearInterval(interval);
+  }, [fetchBackends]);
+
+  const checkNow = async () => {
+    setChecking(true);
+    try {
+      const res = await fetch("/api/backends", { method: "POST" });
+      const data = await res.json();
+      if (Array.isArray(data)) setBackends(data);
+    } catch { /* silent */ }
+    finally { setChecking(false); }
+  };
+
+  if (backends.length === 0) return null;
+
+  const allHealthy = backends.every((b) => b.healthy);
+  const hostname = (url: string) => {
+    try { return new URL(url).hostname; } catch { return url; }
+  };
+
+  return (
+    <div className="backends-panel">
+      <div className="backends-header">
+        <div className="backends-title">
+          <span className={`backend-dot ${allHealthy ? "online" : "offline"}`} />
+          <span className="backends-label">Reacher Backends</span>
+          <span className="backends-count">{backends.filter(b => b.healthy).length}/{backends.length} online</span>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={checkNow} disabled={checking}>
+          {checking ? <Loader2 size={12} className="spin" /> : <Zap size={12} />}
+          {checking ? "Checking…" : "Check Now"}
+        </button>
+      </div>
+      <div className="backends-list">
+        {backends.map((b) => {
+          const pct = Math.round((b.dailyCount / b.dailyLimit) * 100);
+          return (
+            <div key={b.url} className="backend-item">
+              <span className={`backend-dot ${b.healthy ? "online" : "offline"}`} />
+              <span className="backend-url">{hostname(b.url)}</span>
+              <span className="backend-rt">{b.responseTime ? `${b.responseTime}ms` : "—"}</span>
+              <span className="backend-daily">{fmt(b.dailyCount)}/{fmt(b.dailyLimit)}/day</span>
+              <div className="backend-bar-wrap">
+                <div className="backend-bar" style={{ width: `${Math.min(pct, 100)}%`, background: pct > 80 ? "var(--risky)" : "var(--accent)" }} />
+              </div>
+              {!b.healthy && b.lastError && (
+                <span className="backend-error">{b.lastError}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -556,6 +640,7 @@ export default function Dashboard() {
 
         {/* Content */}
         <main className="main">
+          <BackendsPanel />
           {loading ? (
             <div className="empty-state">
               <Loader2 size={24} className="spin" style={{ color: "var(--text-4)" }} />
@@ -747,7 +832,23 @@ export default function Dashboard() {
         .estimate-label { font-size: 11px; color: var(--text-3); margin-top: 2px; }
         .estimate-divider { width: 1px; height: 32px; background: var(--border); margin: 0 12px; flex-shrink: 0; }
         .estimate-tip { font-size: 12px; }
-        /* ── Split info ── */
+        /* ── Backends panel ── */
+        .backends-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 20px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 12px; }
+        .backends-header { display: flex; align-items: center; justify-content: space-between; }
+        .backends-title { display: flex; align-items: center; gap: 8px; }
+        .backends-label { font-size: 13px; font-weight: 600; color: var(--text-1); }
+        .backends-count { font-size: 12px; color: var(--text-3); }
+        .backends-list { display: flex; flex-direction: column; gap: 8px; }
+        .backend-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .backend-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .backend-dot.online { background: var(--safe); }
+        .backend-dot.offline { background: var(--invalid); }
+        .backend-url { font-size: 12px; font-family: monospace; color: var(--text-2); min-width: 130px; }
+        .backend-rt { font-size: 11px; color: var(--text-3); min-width: 45px; }
+        .backend-daily { font-size: 11px; color: var(--text-3); min-width: 110px; font-variant-numeric: tabular-nums; }
+        .backend-bar-wrap { flex: 1; height: 4px; background: var(--surface-2); border-radius: 999px; overflow: hidden; min-width: 60px; }
+        .backend-bar { height: 100%; border-radius: 999px; transition: width 0.3s; }
+        .backend-error { font-size: 11px; color: var(--invalid); width: 100%; padding-left: 17px; }
         .split-info { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
         .split-icon { font-size: 28px; }
         .split-title { font-size: 15px; color: var(--text-1); }

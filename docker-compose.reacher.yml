@@ -1,0 +1,14 @@
+# Use this on backend-only VPS servers (VPS1, VPS2, VPS3)
+# Run with: docker compose -f docker-compose.reacher.yml up -d
+
+services:
+  reacher:
+    image: reacherhq/backend:latest
+    container_name: reacher-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend_config.toml:/app/backend_config.toml:ro
+    environment:
+      - RUST_LOG=reacher=info
