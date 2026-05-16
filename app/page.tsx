@@ -539,6 +539,13 @@ function BackendsPanel() {
               <span className="backend-url">{hostname(b.url)}</span>
               <span className="backend-rt">{b.responseTime ? `${b.responseTime}ms` : "—"}</span>
               <span className="backend-daily">{fmt(b.dailyCount)}/{fmt(b.dailyLimit)}/day</span>
+              {(b as unknown as {coolingFor: number}).coolingFor > 0 ? (
+                <span className="backend-cooling">
+                  ❄️ cooling {Math.round((b as unknown as {coolingFor: number}).coolingFor / 60)}m
+                </span>
+              ) : (
+                <span className="backend-active">▶ active</span>
+              )}
               <div className="backend-bar-wrap">
                 <div className="backend-bar" style={{ width: `${Math.min(pct, 100)}%`, background: pct > 80 ? "var(--risky)" : "var(--accent)" }} />
               </div>
@@ -849,6 +856,8 @@ export default function Dashboard() {
         .backend-bar-wrap { flex: 1; height: 4px; background: var(--surface-2); border-radius: 999px; overflow: hidden; min-width: 60px; }
         .backend-bar { height: 100%; border-radius: 999px; transition: width 0.3s; }
         .backend-error { font-size: 11px; color: var(--invalid); width: 100%; padding-left: 17px; }
+        .backend-cooling { font-size: 11px; color: var(--risky); font-weight: 500; }
+        .backend-active { font-size: 11px; color: var(--safe); font-weight: 500; }
         .split-info { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
         .split-icon { font-size: 28px; }
         .split-title { font-size: 15px; color: var(--text-1); }

@@ -31,11 +31,15 @@ services:
       - AUTH_SECRET=change-this-to-a-random-secret-string-min-32-chars
       - REACHER_FROM_EMAIL=verify@nyelizabeth.net
       - REACHER_HELLO_NAME=verify.nyelizabeth.net
-      # ── Reacher backends (comma-separated, add as many as you have) ──
-      # Format: http://VPS1_IP:8080,http://VPS2_IP:8080,http://VPS3_IP:8080
+      # ── Reacher backends (comma-separated) ──
       - REACHER_BACKEND_URLS=http://VPS1_IP:8080,http://VPS2_IP:8080
-      # ── Daily limit per backend (emails/day per VPS) ──
-      - REACHER_DAILY_LIMIT_PER_BACKEND=50000
+      # ── Per-backend limits and rhythm ──
+      - REACHER_DAILY_LIMIT_PER_BACKEND=40000
+      - REACHER_CONCURRENCY_PER_BACKEND=2
+      - REACHER_BATCH_SIZE=200
+      - REACHER_SHORT_BREAK_MINS=5
+      - REACHER_LONG_BREAK_MINS=20
+      - REACHER_LONG_BREAK_EVERY_BATCHES=6
     depends_on:
       postgres:
         condition: service_healthy

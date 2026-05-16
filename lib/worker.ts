@@ -1,13 +1,15 @@
 import { prisma } from "./prisma";
 import { resolveMx } from "node:dns/promises";
 import {
-  getNextBackend,
-  markBackendFailed,
-  incrementBackendCount,
+  waitForAvailableBackend,
+  reserveBackend,
+  recordVerification,
+  releaseBackend,
+  getRequestDelay,
   startHealthChecks,
 } from "./backends";
 
-// Start health checks when worker module loads
+// Start health checks when worker loads
 startHealthChecks();
 
 // ── Concurrency config ─────────────────────────────────────────────────────
@@ -43,12 +45,10 @@ const domainMxCache = new Map<string, string>();
 
 function pruneCacheIfNeeded() {
   if (mxCache.size > MAX_CACHE_SIZE) {
-    const toDelete = [...mxCache.keys()].slice(0, 10000);
-    toDelete.forEach((k) => mxCache.delete(k));
+    [...mxCache.keys()].slice(0, 10000).forEach((k) => mxCache.delete(k));
   }
   if (domainMxCache.size > MAX_CACHE_SIZE) {
-    const toDelete = [...domainMxCache.keys()].slice(0, 10000);
-    toDelete.forEach((k) => domainMxCache.delete(k));
+    [...domainMxCache.keys()].slice(0, 10000).forEach((k) => domainMxCache.delete(k));
   }
 }
 
@@ -104,24 +104,21 @@ async function waitIfPaused(jobId: string): Promise<boolean> {
   if (state !== "paused") return true;
 
   await prisma.job.update({ where: { id: jobId }, data: { status: "PAUSED" } });
-
   while (jobControl.get(jobId) === "paused") {
     await new Promise((r) => setTimeout(r, 500));
   }
-
   if (jobControl.get(jobId) === "stopped") return false;
-
   await prisma.job.update({ where: { id: jobId }, data: { status: "RUNNING" } });
   return true;
 }
 
-// ── Reacher call with multi-backend support ────────────────────────────────
+// ── Reacher call ───────────────────────────────────────────────────────────
 async function verifyEmail(email: string): Promise<Record<string, unknown>> {
-  const backend = getNextBackend();
+  // Wait for an available backend (respects cooldowns + concurrency limits)
+  const backend = await waitForAvailableBackend();
+  if (!backend) throw new Error("No backends available — all offline or daily limit reached");
 
-  if (!backend) {
-    throw new Error("No healthy backends available — all backends offline or daily limit reached");
-  }
+  reserveBackend(backend.url);
 
   const body: Record<string, unknown> = {
     to_email: email.trim().toLowerCase(),
@@ -136,14 +133,13 @@ async function verifyEmail(email: string): Promise<Record<string, unknown>> {
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
-
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    incrementBackendCount(backend.url);
-    return res.json();
+    const data = await res.json();
+    recordVerification(backend.url); // increments count, triggers cooldown if batch complete
+    return data;
   } catch (err) {
     const msg = err instanceof Error ? err.message : "error";
-    markBackendFailed(backend.url, msg);
+    releaseBackend(backend.url, msg);
     throw err;
   }
 }
@@ -205,6 +201,9 @@ export async function runJob(jobId: string) {
           data: { processed: { increment: 1 }, unverifiable: { increment: 1 } },
         });
       } else {
+        // Human-like delay before each request
+        await new Promise((r) => setTimeout(r, getRequestDelay()));
+
         const data = await verifyEmail(item.email);
         const status = classifyResult(data);
         const smtp = (data.smtp as Record<string, unknown>) || {};
@@ -215,13 +214,13 @@ export async function runJob(jobId: string) {
           where: { id: item.id },
           data: {
             status,
-            isReachable:     (data.is_reachable as string)     || "",
-            isDisposable:    (misc.is_disposable as boolean)    || false,
-            isRoleAccount:   (misc.is_role_account as boolean)  || false,
-            isCatchAll:      (smtp.is_catch_all as boolean)     || false,
-            mxAcceptsMail:   (mx2.accepts_mail as boolean)      || false,
-            smtpDeliverable: (smtp.is_deliverable as boolean)   || false,
-            smtpDisabled:    (smtp.is_disabled as boolean)      || false,
+            isReachable:     (data.is_reachable as string)    || "",
+            isDisposable:    (misc.is_disposable as boolean)   || false,
+            isRoleAccount:   (misc.is_role_account as boolean) || false,
+            isCatchAll:      (smtp.is_catch_all as boolean)    || false,
+            mxAcceptsMail:   (mx2.accepts_mail as boolean)     || false,
+            smtpDeliverable: (smtp.is_deliverable as boolean)  || false,
+            smtpDisabled:    (smtp.is_disabled as boolean)     || false,
           },
         });
 
@@ -257,6 +256,7 @@ export async function runJob(jobId: string) {
   let idx = 0;
 
   while (idx < queue.length || totalActive > 0) {
+    // Check stop
     if (jobControl.get(jobId) === "stopped") {
       while (totalActive > 0) await new Promise((r) => setTimeout(r, 200));
       await prisma.job.update({ where: { id: jobId }, data: { status: "STOPPED" } });
@@ -264,6 +264,7 @@ export async function runJob(jobId: string) {
       return;
     }
 
+    // Check pause
     if (jobControl.get(jobId) === "paused") {
       const ok = await waitIfPaused(jobId);
       if (!ok) {
