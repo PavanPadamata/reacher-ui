@@ -34,7 +34,7 @@ services:
       # ── Reacher backends (comma-separated) ──
       - REACHER_BACKEND_URLS=http://VPS1_IP:8080,http://VPS2_IP:8080
       # ── Per-backend limits and rhythm ──
-      - REACHER_DAILY_LIMIT_PER_BACKEND=40000
+      - REACHER_DAILY_LIMIT_PER_BACKEND=80000
       - REACHER_CONCURRENCY_PER_BACKEND=2
       - REACHER_BATCH_SIZE=200
       - REACHER_SHORT_BREAK_MINS=5

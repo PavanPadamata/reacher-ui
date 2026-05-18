@@ -18,6 +18,7 @@ model Job {
   invalid     Int      @default(0)
   unknown     Int      @default(0)
   unverifiable Int     @default(0)
+  catchAll    Int      @default(0)
   status      JobStatus @default(PENDING)
   concurrency Int      @default(10)
   groupId     String?  // links part1 + part2 of same original file
@@ -58,6 +59,7 @@ enum JobStatus {
   COMPLETED
   STOPPED
   FAILED
+  DAILY_LIMIT_REACHED
 }
 
 model Admin {
@@ -65,4 +67,13 @@ model Admin {
   email     String   @unique
   password  String   // bcrypt hashed
   createdAt DateTime @default(now())
+}
+
+model MxCache {
+  domain      String   @id
+  mxHost      String
+  isEnterprise Boolean @default(false)
+  cachedAt    DateTime @default(now())
+
+  @@index([domain])
 }

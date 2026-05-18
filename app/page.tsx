@@ -20,7 +20,7 @@ interface Backend {
   lastReset: string;
 }
 
-type JobStatus = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "STOPPED" | "FAILED";
+type JobStatus = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "STOPPED" | "FAILED" | "DAILY_LIMIT_REACHED";
 
 interface Job {
   id: string;
@@ -33,6 +33,7 @@ interface Job {
   invalid: number;
   unknown: number;
   unverifiable: number;
+  catchAll: number;
   status: JobStatus;
   concurrency: number;
   groupId: string | null;
@@ -74,12 +75,13 @@ function speed(job: Job): string {
 }
 
 const STATUS_CONFIG: Record<JobStatus, { label: string; color: string; dot: string }> = {
-  PENDING:   { label: "Pending",   color: "var(--text-3)",   dot: "var(--text-4)" },
-  RUNNING:   { label: "Running",   color: "var(--accent)",   dot: "var(--accent)" },
-  PAUSED:    { label: "Paused",    color: "var(--risky)",    dot: "var(--risky)" },
-  COMPLETED: { label: "Completed", color: "var(--safe)",     dot: "var(--safe)" },
-  STOPPED:   { label: "Stopped",   color: "var(--text-3)",   dot: "var(--text-3)" },
-  FAILED:    { label: "Failed",    color: "var(--invalid)",  dot: "var(--invalid)" },
+  PENDING:             { label: "Pending",          color: "var(--text-3)",   dot: "var(--text-4)" },
+  RUNNING:             { label: "Running",           color: "var(--accent)",   dot: "var(--accent)" },
+  PAUSED:              { label: "Paused",            color: "var(--risky)",    dot: "var(--risky)" },
+  COMPLETED:           { label: "Completed",         color: "var(--safe)",     dot: "var(--safe)" },
+  STOPPED:             { label: "Stopped",           color: "var(--text-3)",   dot: "var(--text-3)" },
+  FAILED:              { label: "Failed",            color: "var(--invalid)",  dot: "var(--invalid)" },
+  DAILY_LIMIT_REACHED: { label: "Daily limit — resumes midnight", color: "var(--risky)", dot: "var(--risky)" },
 };
 
 // ── Theme Toggle ──────────────────────────────────────────────────────────────
@@ -326,6 +328,8 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
   const isPaused = job.status === "PAUSED";
   const isDone = ["COMPLETED", "STOPPED", "FAILED"].includes(job.status);
   const canStart = ["PENDING", "STOPPED", "PAUSED"].includes(job.status);
+  const [editingConcurrency, setEditingConcurrency] = useState(false);
+  const [newConcurrency, setNewConcurrency] = useState(job.concurrency);
 
   const action = async (type: string) => {
     if (type === "delete") {
@@ -336,6 +340,16 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
     } else {
       await fetch(`/api/jobs/${job.id}/actions?action=${type}`, { method: "POST" });
     }
+    onAction();
+  };
+
+  const saveConcurrency = async () => {
+    await fetch(`/api/jobs/${job.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ concurrency: newConcurrency }),
+    });
+    setEditingConcurrency(false);
     onAction();
   };
 
@@ -354,7 +368,29 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
             {sc.label}
           </span>
         </div>
-        <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails · {job.concurrency} concurrent</p>
+        <div className="job-meta-row">
+          <p className="job-meta">{job.fileName} · {fmt(job.totalEmails)} emails</p>
+          {editingConcurrency ? (
+            <div className="concurrency-edit">
+              <input
+                type="number" min={1} max={50}
+                value={newConcurrency}
+                onChange={(e) => setNewConcurrency(Number(e.target.value))}
+                className="concurrency-input"
+              />
+              <button className="btn btn-primary btn-sm" onClick={saveConcurrency}>Save</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setEditingConcurrency(false)}>Cancel</button>
+            </div>
+          ) : (
+            <button
+              className="concurrency-badge"
+              onClick={() => { setNewConcurrency(job.concurrency); setEditingConcurrency(true); }}
+              title="Click to edit concurrency"
+            >
+              {job.concurrency} concurrent ✎
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Progress bar */}
@@ -436,6 +472,11 @@ function JobCard({ job, onAction }: { job: Job; onAction: () => void }) {
               <button className="btn btn-ghost btn-sm download-invalid" onClick={() => download("invalid")}>
                 <Download size={12} /> Invalid ({fmt(job.invalid)})
               </button>
+              {job.catchAll > 0 && (
+                <button className="btn btn-ghost btn-sm" style={{ color: "var(--text-3)", borderColor: "var(--border-2)" }} onClick={() => download("catchall")}>
+                  <Download size={12} /> Catch-all ({fmt(job.catchAll)})
+                </button>
+              )}
             </>
           )}
           <button className="btn btn-ghost btn-sm btn-danger" onClick={() => action("delete")}>
@@ -480,7 +521,80 @@ function MergedDownloadBar({ groupId, jobs }: { groupId: string; jobs: Job[] }) 
   );
 }
 
-// ── Backends Panel ────────────────────────────────────────────────────────────
+// ── Blacklist Monitor ─────────────────────────────────────────────────────────
+
+interface BlacklistResult {
+  ip: string;
+  listed: string[];
+  clean: string[];
+  checkedAt: string;
+}
+
+function BlacklistPanel() {
+  const [results, setResults] = useState<BlacklistResult[]>([]);
+  const [checking, setChecking] = useState(false);
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
+
+  const check = useCallback(async () => {
+    setChecking(true);
+    try {
+      const res = await fetch("/api/blacklist");
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setResults(data);
+        setLastChecked(new Date().toLocaleTimeString());
+      }
+    } catch { /* silent */ }
+    finally { setChecking(false); }
+  }, []);
+
+  useEffect(() => {
+    check();
+    // Check every 6 hours
+    const interval = setInterval(check, 6 * 60 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [check]);
+
+  if (results.length === 0 && !checking) return null;
+
+  const anyListed = results.some((r) => r.listed.length > 0);
+
+  return (
+    <div className="backends-panel" style={{ borderColor: anyListed ? "var(--invalid)" : "var(--border)" }}>
+      <div className="backends-header">
+        <div className="backends-title">
+          <span className={`backend-dot ${anyListed ? "offline" : "online"}`} />
+          <span className="backends-label">IP Blacklist Status</span>
+          {lastChecked && <span className="backends-count">checked {lastChecked}</span>}
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={check} disabled={checking}>
+          {checking ? <Loader2 size={12} className="spin" /> : <Zap size={12} />}
+          {checking ? "Checking…" : "Check Now"}
+        </button>
+      </div>
+      <div className="backends-list">
+        {results.map((r) => (
+          <div key={r.ip} className="backend-item">
+            <span className={`backend-dot ${r.listed.length === 0 ? "online" : "offline"}`} />
+            <span className="backend-url">{r.ip}</span>
+            {r.listed.length === 0 ? (
+              <span className="backend-active">✅ Clean on all {r.clean.length} lists</span>
+            ) : (
+              <span className="backend-error">
+                ❌ Listed on: {r.listed.join(", ")}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+      {anyListed && (
+        <p style={{ fontSize: 12, color: "var(--invalid)", marginTop: 4 }}>
+          ⚠️ Stop jobs on blacklisted IPs immediately and request delisting at mxtoolbox.com/blacklists
+        </p>
+      )}
+    </div>
+  );
+}
 
 function BackendsPanel() {
   const [backends, setBackends] = useState<Backend[]>([]);
@@ -647,6 +761,7 @@ export default function Dashboard() {
 
         {/* Content */}
         <main className="main">
+          <BlacklistPanel />
           <BackendsPanel />
           {loading ? (
             <div className="empty-state">
@@ -750,6 +865,11 @@ export default function Dashboard() {
         .job-title-row { display: flex; align-items: center; gap: 10px; }
         .job-name { font-size: 15px; font-weight: 600; color: var(--text-1); letter-spacing: -0.2px; }
         .job-meta { font-size: 12px; color: var(--text-3); }
+        .job-meta-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+        .concurrency-badge { font-size: 12px; color: var(--accent); background: var(--accent-bg); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent); border-radius: 6px; padding: 2px 8px; cursor: pointer; font-family: inherit; transition: all 0.12s; }
+        .concurrency-badge:hover { background: var(--accent); color: #fff; }
+        .concurrency-edit { display: flex; align-items: center; gap: 6px; }
+        .concurrency-input { width: 60px; padding: 4px 8px; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); color: var(--text-1); font-size: 13px; font-family: inherit; outline: none; text-align: center; }
         .status-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
         .pulse-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 

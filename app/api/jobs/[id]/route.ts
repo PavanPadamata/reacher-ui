@@ -28,7 +28,19 @@ export async function POST(_req: NextRequest, { params }: Params) {
   return NextResponse.json({ ok: true });
 }
 
-// DELETE /api/jobs/[id] — delete job and all results
+// PATCH /api/jobs/[id] — update concurrency
+export async function PATCH(req: NextRequest, { params }: Params) {
+  const { id } = await params;
+  const { concurrency } = await req.json();
+  if (!concurrency || concurrency < 1 || concurrency > 50) {
+    return NextResponse.json({ error: "Concurrency must be 1-50" }, { status: 400 });
+  }
+  const job = await prisma.job.update({
+    where: { id },
+    data: { concurrency: Math.round(concurrency) },
+  });
+  return NextResponse.json(job);
+}
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const { id } = await params;
   signalJob(id, "stop");

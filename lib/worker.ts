@@ -1,7 +1,7 @@
 import { prisma } from "./prisma";
 import { resolveMx } from "node:dns/promises";
 import {
-  waitForAvailableBackend,
+  waitForBackendForDomain,
   reserveBackend,
   recordVerification,
   releaseBackend,
@@ -38,10 +38,10 @@ const UNVERIFIABLE_MX_PATTERNS = [
   "trendmicro.com",
 ];
 
-// ── DNS caches ─────────────────────────────────────────────────────────────
+// ── DNS caches — in-memory L1 + PostgreSQL L2 ─────────────────────────────
 const MAX_CACHE_SIZE = 50000;
-const mxCache = new Map<string, boolean>();
-const domainMxCache = new Map<string, string>();
+const mxCache = new Map<string, boolean>();        // domain → isEnterprise
+const domainMxCache = new Map<string, string>();   // domain → mxHost
 
 function pruneCacheIfNeeded() {
   if (mxCache.size > MAX_CACHE_SIZE) {
@@ -52,35 +52,48 @@ function pruneCacheIfNeeded() {
   }
 }
 
-async function getDomainMx(domain: string): Promise<string> {
-  if (domainMxCache.has(domain)) return domainMxCache.get(domain)!;
-  pruneCacheIfNeeded();
-  try {
-    const records = await resolveMx(domain);
-    const mx = records.sort((a, b) => a.priority - b.priority)[0]?.exchange || domain;
-    domainMxCache.set(domain, mx);
-    return mx;
-  } catch {
-    domainMxCache.set(domain, domain);
-    return domain;
+async function getDomainMxWithCache(domain: string): Promise<{ mxHost: string; isEnterprise: boolean }> {
+  // L1 — in-memory
+  if (domainMxCache.has(domain) && mxCache.has(domain)) {
+    return { mxHost: domainMxCache.get(domain)!, isEnterprise: mxCache.get(domain)! };
   }
-}
 
-async function isUnverifiableDomain(email: string): Promise<boolean> {
-  const domain = email.split("@")[1]?.toLowerCase();
-  if (!domain) return false;
-  if (mxCache.has(domain)) return mxCache.get(domain)!;
+  // L2 — PostgreSQL cache
+  try {
+    const cached = await prisma.mxCache.findUnique({ where: { domain } });
+    if (cached) {
+      domainMxCache.set(domain, cached.mxHost);
+      mxCache.set(domain, cached.isEnterprise);
+      return { mxHost: cached.mxHost, isEnterprise: cached.isEnterprise };
+    }
+  } catch { /* ignore DB errors, fall through to DNS */ }
+
+  // L3 — real DNS lookup
   pruneCacheIfNeeded();
   try {
     const records = await resolveMx(domain);
+    const mxHost = records.sort((a, b) => a.priority - b.priority)[0]?.exchange || domain;
     const isEnterprise = records.some((r) =>
       UNVERIFIABLE_MX_PATTERNS.some((p) => r.exchange.toLowerCase().includes(p))
     );
+
+    // Store in memory
+    domainMxCache.set(domain, mxHost);
     mxCache.set(domain, isEnterprise);
-    return isEnterprise;
+
+    // Store in PostgreSQL (non-blocking)
+    prisma.mxCache.upsert({
+      where: { domain },
+      create: { domain, mxHost, isEnterprise },
+      update: { mxHost, isEnterprise, cachedAt: new Date() },
+    }).catch(() => {});
+
+    return { mxHost, isEnterprise };
   } catch {
+    const fallback = { mxHost: domain, isEnterprise: false };
+    domainMxCache.set(domain, domain);
     mxCache.set(domain, false);
-    return false;
+    return fallback;
   }
 }
 
@@ -113,9 +126,9 @@ async function waitIfPaused(jobId: string): Promise<boolean> {
 }
 
 // ── Reacher call ───────────────────────────────────────────────────────────
-async function verifyEmail(email: string): Promise<Record<string, unknown>> {
-  // Wait for an available backend (respects cooldowns + concurrency limits)
-  const backend = await waitForAvailableBackend();
+async function verifyEmail(email: string, mxHost: string): Promise<Record<string, unknown>> {
+  // Wait for a backend that hasn't recently probed this MX host
+  const backend = await waitForBackendForDomain(mxHost);
   if (!backend) throw new Error("No backends available — all offline or daily limit reached");
 
   reserveBackend(backend.url);
@@ -135,7 +148,7 @@ async function verifyEmail(email: string): Promise<Record<string, unknown>> {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    recordVerification(backend.url); // increments count, triggers cooldown if batch complete
+    recordVerification(backend.url);
     return data;
   } catch (err) {
     const msg = err instanceof Error ? err.message : "error";
@@ -187,11 +200,12 @@ export async function runJob(jobId: string) {
   const incMxActive  = (mx: string) => mxActive.set(mx, getMxActive(mx) + 1);
   const decMxActive  = (mx: string) => mxActive.set(mx, Math.max(0, getMxActive(mx) - 1));
 
-  async function processOne(item: { id: string; email: string; name: string }, mx: string): Promise<void> {
+  async function processOne(item: { id: string; email: string; name: string }, mxHost: string): Promise<void> {
     try {
-      const unverifiable = await isUnverifiableDomain(item.email);
+      const domain = item.email.split("@")[1]?.toLowerCase() || "";
+      const { isEnterprise } = await getDomainMxWithCache(domain);
 
-      if (unverifiable) {
+      if (isEnterprise) {
         await prisma.result.update({
           where: { id: item.id },
           data: { status: "unverifiable", isReachable: "unverifiable" },
@@ -204,7 +218,7 @@ export async function runJob(jobId: string) {
         // Human-like delay before each request
         await new Promise((r) => setTimeout(r, getRequestDelay()));
 
-        const data = await verifyEmail(item.email);
+        const data = await verifyEmail(item.email, mxHost);
         const status = classifyResult(data);
         const smtp = (data.smtp as Record<string, unknown>) || {};
         const misc = (data.misc as Record<string, unknown>) || {};
@@ -232,11 +246,23 @@ export async function runJob(jobId: string) {
             ...(status === "risky"   && { risky:   { increment: 1 } }),
             ...(status === "invalid" && { invalid: { increment: 1 } }),
             ...(status === "unknown" && { unknown: { increment: 1 } }),
+            ...((smtp.is_catch_all as boolean) && { catchAll: { increment: 1 } }),
           },
         });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "error";
+
+      // If no backends available due to daily limit — pause job until tomorrow
+      if (msg.includes("daily limit")) {
+        await prisma.job.update({
+          where: { id: jobId },
+          data: { status: "DAILY_LIMIT_REACHED" as never },
+        });
+        jobControl.set(jobId, "stopped");
+        return;
+      }
+
       await prisma.result.update({
         where: { id: item.id },
         data: { status: "error", rawError: msg },
@@ -247,7 +273,7 @@ export async function runJob(jobId: string) {
       });
     } finally {
       totalActive--;
-      decMxActive(mx);
+      decMxActive(mxHost);
     }
   }
 
@@ -279,7 +305,7 @@ export async function runJob(jobId: string) {
     if (idx < queue.length && totalActive < config.total) {
       const item = queue[idx];
       const domain = item.email.split("@")[1]?.toLowerCase() || "";
-      const mx = await getDomainMx(domain);
+      const { mxHost: mx } = await getDomainMxWithCache(domain);
 
       if (getMxActive(mx) >= config.perDomain) {
         if (idx < queue.length - 1) { idx++; continue; }

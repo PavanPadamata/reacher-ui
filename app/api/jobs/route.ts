@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { recoverStuckJobs } from "@/lib/recover";
+import { recoverStuckJobs, scheduleMidnightResume } from "@/lib/recover";
+import { runJob } from "@/lib/worker";
 
-let recovered = false;
+let initialized = false;
 
 export async function GET() {
   try {
-    // Run once on first request after server starts
-    if (!recovered) {
-      recovered = true;
+    if (!initialized) {
+      initialized = true;
       await recoverStuckJobs();
+      // Auto-resume daily-limit jobs at midnight
+      scheduleMidnightResume((jobId) => {
+        runJob(jobId).catch(console.error);
+      });
     }
 
     const jobs = await prisma.job.findMany({
@@ -25,6 +29,7 @@ export async function GET() {
         invalid: true,
         unknown: true,
         unverifiable: true,
+      catchAll: true,
         status: true,
         concurrency: true,
         groupId: true,
