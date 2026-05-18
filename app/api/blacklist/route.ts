@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 
-// Major blacklists to check via DNS lookup
+// Only real blocklists — not reputation scoring services
 const BLACKLISTS = [
   "zen.spamhaus.org",
-  "bl.spamcop.net", 
+  "bl.spamcop.net",
   "b.barracudacentral.org",
   "dnsbl.sorbs.net",
-  "hostkarma.junkemailfilter.com",
-  "score.senderscore.com",
+  "dnsbl-1.uceprotect.net",
+  "psbl.surriel.com",
 ];
 
 async function checkBlacklist(ip: string, blacklist: string): Promise<boolean> {
